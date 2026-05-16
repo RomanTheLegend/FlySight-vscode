@@ -1,0 +1,106 @@
+/***************************************************************************
+**                                                                        **
+**  FlySight 2 firmware                                                   **
+**  Copyright 2023 Bionic Avionics Inc.                                   **
+**                                                                        **
+**  This program is free software: you can redistribute it and/or modify  **
+**  it under the terms of the GNU General Public License as published by  **
+**  the Free Software Foundation, either version 3 of the License, or     **
+**  (at your option) any later version.                                   **
+**                                                                        **
+**  This program is distributed in the hope that it will be useful,       **
+**  but WITHOUT ANY WARRANTY; without even the implied warranty of        **
+**  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         **
+**  GNU General Public License for more details.                          **
+**                                                                        **
+**  You should have received a copy of the GNU General Public License     **
+**  along with this program.  If not, see <http://www.gnu.org/licenses/>. **
+**                                                                        **
+****************************************************************************
+**  Contact: Bionic Avionics Inc.                                         **
+**  Website: http://flysight.ca/                                          **
+****************************************************************************/
+
+#include "main.h"
+#include "app_common.h"
+#include "charge.h"
+#include "led.h"
+#include "resource_manager.h"
+#include "usb_device.h"
+#include "usbd_core.h"
+#include "usbd_storage_if.h"
+
+extern USBD_HandleTypeDef hUsbDeviceFS;
+extern UART_HandleTypeDef huart1;
+
+static void FS_USBMode_BeginActivity(void)
+{
+	FS_LED_Off();
+}
+
+
+static void FS_USBMode_EndActivity(void)
+{
+	FS_LED_On();
+}
+
+void FS_USBMode_Init(void)
+{
+	/* Enable charge status */
+	FS_Charge_Init();
+
+	/* Turn on LEDs */
+	FS_LED_On();
+
+	/* Initialize microSD */
+	FS_ResourceManager_RequestResource(FS_RESOURCE_MICROSD);
+
+	/* Algorithm to use USB on CPU1 comes from AN5289 Figure 9 */
+
+	/* Configure peripheral clocks */
+	PeriphClock_Config();
+
+	/* Enable USB interface */
+	MX_USB_Device_Init();
+
+	/* Set disk activity callbacks */
+	USBD_SetActivityCallbacks(FS_USBMode_BeginActivity, FS_USBMode_EndActivity);
+}
+
+void FS_USBMode_DeInit(void)
+{
+	/* Clear disk activity callbacks */
+	USBD_SetActivityCallbacks(0, 0);
+
+	/* Turn off LEDs */
+	FS_LED_Off();
+
+	/* Disable charge status */
+	FS_Charge_DeInit();
+
+	/* Algorithm to use USB on CPU1 comes from AN5289 Figure 9 */
+
+	/* Disable USB interface */
+	if (USBD_DeInit(&hUsbDeviceFS) != USBD_OK)
+	{
+		Error_Handler();
+	}
+
+	/* Disable USB power */
+	HAL_PWREx_DisableVddUSB();
+
+	/* Get Sem0 */
+	LL_HSEM_1StepLock(HSEM, CFG_HW_RNG_SEMID);
+
+	/* Disable HSI48 */
+	LL_RCC_HSI48_Disable();
+
+	/* Release Sem0 */
+	LL_HSEM_ReleaseLock(HSEM, CFG_HW_RNG_SEMID, 0);
+
+	/* Release HSI48 semaphore */
+	LL_HSEM_ReleaseLock(HSEM, CFG_HW_CLK48_CONFIG_SEMID, 0);
+
+	/* De-initialize microSD */
+	FS_ResourceManager_ReleaseResource(FS_RESOURCE_MICROSD);
+}
