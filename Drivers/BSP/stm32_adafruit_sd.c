@@ -134,6 +134,15 @@ typedef struct {
 #define SD_CSD_STRUCT_V1          0x2    /* CSD struct version V1 */
 #define SD_CSD_STRUCT_V2          0x1    /* CSD struct version V2 */
 
+#define SD_SWITCH_STATUS_SIZE             64U
+#define SD_SWITCH_FUNC_CHECK_HIGH_SPEED   0x00FFFFF1U
+#define SD_SWITCH_FUNC_SET_HIGH_SPEED     0x80FFFFF1U
+#define SD_SWITCH_STATUS_FG1_SUPPORT      13U
+#define SD_SWITCH_STATUS_FG1_SELECTED     16U
+#define SD_SWITCH_FG1_HIGH_SPEED_SUPPORT  0x02U
+#define SD_SWITCH_FG1_HIGH_SPEED_SELECTED 0x01U
+#define SD_SWITCH_FG1_SELECTED_MASK       0x0FU
+
 
 /**
   * @brief  SD ansewer format
@@ -155,14 +164,15 @@ typedef enum {
 #define SD_TOKEN_START_DATA_SINGLE_BLOCK_READ    0xFE  /* Data token start byte, Start Single Block Read */
 #define SD_TOKEN_START_DATA_MULTIPLE_BLOCK_READ  0xFE  /* Data token start byte, Start Multiple Block Read */
 #define SD_TOKEN_START_DATA_SINGLE_BLOCK_WRITE   0xFE  /* Data token start byte, Start Single Block Write */
-#define SD_TOKEN_START_DATA_MULTIPLE_BLOCK_WRITE 0xFD  /* Data token start byte, Start Multiple Block Write */
-#define SD_TOKEN_STOP_DATA_MULTIPLE_BLOCK_WRITE  0xFD  /* Data toke stop byte, Stop Multiple Block Write */
+#define SD_TOKEN_START_DATA_MULTIPLE_BLOCK_WRITE 0xFC  /* Data token start byte, Start Multiple Block Write */
+#define SD_TOKEN_STOP_DATA_MULTIPLE_BLOCK_WRITE  0xFD  /* Data token stop byte, Stop Multiple Block Write */
 
 /**
   * @brief  Commands: CMDxx = CMD-number | 0x40
   */
 #define SD_CMD_GO_IDLE_STATE          0   /* CMD0 = 0x40  */
 #define SD_CMD_SEND_OP_COND           1   /* CMD1 = 0x41  */
+#define SD_CMD_SWITCH_FUNC            6   /* CMD6 = 0x46  */
 #define SD_CMD_SEND_IF_COND           8   /* CMD8 = 0x48  */
 #define SD_CMD_SEND_CSD               9   /* CMD9 = 0x49  */
 #define SD_CMD_SEND_CID               10  /* CMD10 = 0x4A */
@@ -172,6 +182,7 @@ typedef enum {
 #define SD_CMD_READ_SINGLE_BLOCK      17  /* CMD17 = 0x51 */
 #define SD_CMD_READ_MULT_BLOCK        18  /* CMD18 = 0x52 */
 #define SD_CMD_SET_BLOCK_COUNT        23  /* CMD23 = 0x57 */
+#define SD_ACMD_SET_WR_BLK_ERASE_COUNT 23 /* ACMD23 = 0x57 after CMD55 */
 #define SD_CMD_WRITE_SINGLE_BLOCK     24  /* CMD24 = 0x58 */
 #define SD_CMD_WRITE_MULT_BLOCK       25  /* CMD25 = 0x59 */
 #define SD_CMD_PROG_CSD               27  /* CMD27 = 0x5B */
@@ -251,6 +262,9 @@ __IO uint8_t SdStatus = SD_NOT_PRESENT;
 */
 uint16_t flag_SDHC = 0;
 
+/* Static buffer for SPI dummy receive data during writes */
+static uint8_t sd_dummy_buf[512];
+
 /**
   * @}
   */
@@ -260,7 +274,11 @@ static uint8_t SD_GetCIDRegister(SD_CID* Cid);
 static uint8_t SD_GetCSDRegister(SD_CSD* Csd);
 static uint8_t SD_GetDataResponse(void);
 static uint8_t SD_GoIdleState(void);
+static uint8_t SD_EnableHighSpeedMode(void);
+static uint8_t SD_SetPreEraseBlockCount(uint32_t BlockCount);
+static uint8_t SD_ReadSwitchStatus(uint32_t Arg, uint8_t *Status);
 static SD_CmdAnswer_typedef SD_SendCmd(uint8_t Cmd, uint32_t Arg, uint8_t Crc, uint8_t Answer);
+static uint8_t SD_StopTransmission(uint32_t Timeout);
 static uint8_t SD_WaitData(uint8_t data);
 static uint8_t SD_ReadData(void);
 /** @defgroup STM32_ADAFRUIT_SD_Private_Function_Prototypes
@@ -285,6 +303,8 @@ static uint8_t SD_ReadData(void);
   */
 uint8_t BSP_SD_Init(void)
 {
+  uint8_t result;
+
   /* Configure IO functionalities for SD pin */
   SD_IO_Init();
 
@@ -292,7 +312,23 @@ uint8_t BSP_SD_Init(void)
   SdStatus = SD_PRESENT;
 
   /* SD initialized and set to SPI mode properly */
-  return SD_GoIdleState();
+  result = SD_GoIdleState();
+
+  if (result == BSP_SD_OK)
+  {
+    if (SD_EnableHighSpeedMode() == BSP_SD_OK)
+    {
+      /* Card accepted SD high-speed mode; restore CubeMX operating speed. */
+      SD_IO_SetFastSpeed();
+    }
+    else
+    {
+      /* Keep cards that stay in default-speed mode below the 25 MHz limit. */
+      SD_IO_SetDefaultSpeed();
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -343,34 +379,35 @@ uint8_t BSP_SD_ReadBlocks(uint32_t *pData, uint32_t ReadAddr, uint32_t NumOfBloc
   uint32_t offset = 0;
   uint32_t addr;
   uint8_t retr = BSP_SD_ERROR;
-  uint8_t *ptr = NULL;
+  uint8_t stopTransmission = 0;
   SD_CmdAnswer_typedef response;
   uint16_t BlockSize = 512;
 
-  /* Send CMD16 (SD_CMD_SET_BLOCKLEN) to set the size of the block and
-     Check if the SD acknowledged the set block length command: R1 response (0x00: no errors) */
-  response = SD_SendCmd(SD_CMD_SET_BLOCKLEN, BlockSize, 0xFF, SD_ANSWER_R1_EXPECTED);
-  SD_IO_CSState(1);
-  SD_IO_WriteByte(SD_DUMMY_BYTE);
-  if ( response.r1 != SD_R1_NO_ERROR)
+  if (NumOfBlocks == 0U)
   {
-     goto error;
+    return BSP_SD_OK;
   }
 
-  ptr = malloc(sizeof(uint8_t)*BlockSize);
-  if( ptr == NULL )
+  /* Send CMD16 only for SDSC cards - SDHC has fixed 512-byte blocks */
+  if (flag_SDHC == 0)
   {
-     goto error;
+    response = SD_SendCmd(SD_CMD_SET_BLOCKLEN, BlockSize, 0xFF, SD_ANSWER_R1_EXPECTED);
+    SD_IO_CSState(1);
+    SD_IO_WriteByte(SD_DUMMY_BYTE);
+    if ( response.r1 != SD_R1_NO_ERROR)
+    {
+       goto error;
+    }
   }
-  memset(ptr, SD_DUMMY_BYTE, sizeof(uint8_t)*BlockSize);
+
+  memset(sd_dummy_buf, SD_DUMMY_BYTE, BlockSize);
 
   /* Initialize the address */
   addr = (ReadAddr * ((flag_SDHC == 1) ? 1 : BlockSize));
 
-  /* Data transfer */
-  while (NumOfBlocks--)
+  if (NumOfBlocks == 1U)
   {
-    /* Send CMD17 (SD_CMD_READ_SINGLE_BLOCK) to read one block */
+    /* === Single-block read with CMD17 === */
     /* Check if the SD acknowledged the read block command: R1 response (0x00: no errors) */
     response = SD_SendCmd(SD_CMD_READ_SINGLE_BLOCK, addr, 0xFF, SD_ANSWER_R1_EXPECTED);
     if ( response.r1 != SD_R1_NO_ERROR)
@@ -382,11 +419,10 @@ uint8_t BSP_SD_ReadBlocks(uint32_t *pData, uint32_t ReadAddr, uint32_t NumOfBloc
     if (SD_WaitData(SD_TOKEN_START_DATA_SINGLE_BLOCK_READ) == BSP_SD_OK)
     {
       /* Read the SD block data : read NumByteToRead data */
-      SD_IO_WriteReadData(ptr, (uint8_t*)pData + offset, BlockSize);
+      SD_IO_WriteReadData(sd_dummy_buf, (uint8_t*)pData + offset, BlockSize);
 
       /* Set next read address*/
       offset += BlockSize;
-      addr = ((flag_SDHC == 1) ? (addr + 1) : (addr + BlockSize));
 
       /* get CRC bytes (not really needed by us, but required by SD) */
       SD_IO_WriteByte(SD_DUMMY_BYTE);
@@ -401,14 +437,55 @@ uint8_t BSP_SD_ReadBlocks(uint32_t *pData, uint32_t ReadAddr, uint32_t NumOfBloc
     SD_IO_CSState(1);
     SD_IO_WriteByte(SD_DUMMY_BYTE);
   }
+  else
+  {
+    /* === Multi-block read with CMD18 === */
+    response = SD_SendCmd(SD_CMD_READ_MULT_BLOCK, addr, 0xFF, SD_ANSWER_R1_EXPECTED);
+    if (response.r1 != SD_R1_NO_ERROR)
+    {
+      goto error;
+    }
+    stopTransmission = 1;
+
+    while (NumOfBlocks--)
+    {
+      /* Now look for the data token to signify the start of the data */
+      if (SD_WaitData(SD_TOKEN_START_DATA_MULTIPLE_BLOCK_READ) == BSP_SD_OK)
+      {
+        /* Read the SD block data : read NumByteToRead data */
+        SD_IO_WriteReadData(sd_dummy_buf, (uint8_t*)pData + offset, BlockSize);
+
+        /* Set next read address*/
+        offset += BlockSize;
+
+        /* get CRC bytes (not really needed by us, but required by SD) */
+        SD_IO_WriteByte(SD_DUMMY_BYTE);
+        SD_IO_WriteByte(SD_DUMMY_BYTE);
+      }
+      else
+      {
+        goto error;
+      }
+    }
+
+    if (SD_StopTransmission(Timeout) != BSP_SD_OK)
+    {
+      goto error;
+    }
+    stopTransmission = 0;
+  }
 
   retr = BSP_SD_OK;
 
 error :
+  if (stopTransmission != 0U)
+  {
+    (void)SD_StopTransmission(Timeout);
+  }
+
   /* Send dummy byte: 8 Clock pulses of delay */
   SD_IO_CSState(1);
   SD_IO_WriteByte(SD_DUMMY_BYTE);
-  if(ptr != NULL) free(ptr);
 
   /* Return the reponse */
   return retr;
@@ -428,77 +505,105 @@ uint8_t BSP_SD_WriteBlocks(uint32_t *pData, uint32_t WriteAddr, uint32_t NumOfBl
   uint32_t offset = 0;
   uint32_t addr;
   uint8_t retr = BSP_SD_ERROR;
-  uint8_t *ptr = NULL;
   SD_CmdAnswer_typedef response;
   uint16_t BlockSize = 512;
 
-  /* Send CMD16 (SD_CMD_SET_BLOCKLEN) to set the size of the block and
-     Check if the SD acknowledged the set block length command: R1 response (0x00: no errors) */
-  response = SD_SendCmd(SD_CMD_SET_BLOCKLEN, BlockSize, 0xFF, SD_ANSWER_R1_EXPECTED);
-  SD_IO_CSState(1);
-  SD_IO_WriteByte(SD_DUMMY_BYTE);
-  if ( response.r1 != SD_R1_NO_ERROR)
+  /* Send CMD16 only for SDSC cards - SDHC has fixed 512-byte blocks */
+  if (flag_SDHC == 0)
   {
-    goto error;
-  }
-
-  ptr = malloc(sizeof(uint8_t)*BlockSize);
-  if (ptr == NULL)
-  {
-    goto error;
+    response = SD_SendCmd(SD_CMD_SET_BLOCKLEN, BlockSize, 0xFF, SD_ANSWER_R1_EXPECTED);
+    SD_IO_CSState(1);
+    SD_IO_WriteByte(SD_DUMMY_BYTE);
+    if (response.r1 != SD_R1_NO_ERROR)
+    {
+      goto error;
+    }
   }
 
   /* Initialize the address */
   addr = (WriteAddr * ((flag_SDHC == 1) ? 1 : BlockSize));
 
-  /* Data transfer */
-  while (NumOfBlocks--)
+  if (NumOfBlocks == 1)
   {
-    /* Send CMD24 (SD_CMD_WRITE_SINGLE_BLOCK) to write blocks  and
-       Check if the SD acknowledged the write block command: R1 response (0x00: no errors) */
+    /* === Single block write with CMD24 === */
     response = SD_SendCmd(SD_CMD_WRITE_SINGLE_BLOCK, addr, 0xFF, SD_ANSWER_R1_EXPECTED);
     if (response.r1 != SD_R1_NO_ERROR)
     {
       goto error;
     }
 
-    /* Send dummy byte for NWR timing : one byte between CMDWRITE and TOKEN */
+    /* NWR timing */
     SD_IO_WriteByte(SD_DUMMY_BYTE);
     SD_IO_WriteByte(SD_DUMMY_BYTE);
 
-    /* Send the data token to signify the start of the data */
+    /* Data token for single block */
     SD_IO_WriteByte(SD_TOKEN_START_DATA_SINGLE_BLOCK_WRITE);
 
-    /* Write the block data to SD */
-    SD_IO_WriteReadData((uint8_t*)pData + offset, ptr, BlockSize);
+    /* Write block data */
+    SD_IO_WriteReadData((uint8_t*)pData, sd_dummy_buf, BlockSize);
 
-    /* Set next write address */
-    offset += BlockSize;
-    addr = ((flag_SDHC == 1) ? (addr + 1) : (addr + BlockSize));
-
-    /* Put CRC bytes (not really needed by us, but required by SD) */
+    /* CRC bytes */
     SD_IO_WriteByte(SD_DUMMY_BYTE);
     SD_IO_WriteByte(SD_DUMMY_BYTE);
 
-    /* Read data response */
+    /* Check data response */
     if (SD_GetDataResponse() != SD_DATA_OK)
     {
-      /* Set response value to failure */
+      goto error;
+    }
+  }
+  else
+  {
+    /* === Multi-block write with CMD25 === */
+    (void)SD_SetPreEraseBlockCount(NumOfBlocks);
+
+    response = SD_SendCmd(SD_CMD_WRITE_MULT_BLOCK, addr, 0xFF, SD_ANSWER_R1_EXPECTED);
+    if (response.r1 != SD_R1_NO_ERROR)
+    {
       goto error;
     }
 
-    SD_IO_CSState(1);
+    /* Write all blocks */
+    while (NumOfBlocks--)
+    {
+      /* NWR timing */
+      SD_IO_WriteByte(SD_DUMMY_BYTE);
+
+      /* Data token for multi-block (0xFC) */
+      SD_IO_WriteByte(SD_TOKEN_START_DATA_MULTIPLE_BLOCK_WRITE);
+
+      /* Write block data */
+      SD_IO_WriteReadData((uint8_t*)pData + offset, sd_dummy_buf, BlockSize);
+      offset += BlockSize;
+
+      /* CRC bytes */
+      SD_IO_WriteByte(SD_DUMMY_BYTE);
+      SD_IO_WriteByte(SD_DUMMY_BYTE);
+
+      /* Check data response */
+      if (SD_GetDataResponse() != SD_DATA_OK)
+      {
+        goto error;
+      }
+    }
+
+    /* Send Stop Token (0xFD) */
     SD_IO_WriteByte(SD_DUMMY_BYTE);
+    SD_IO_WriteByte(SD_TOKEN_STOP_DATA_MULTIPLE_BLOCK_WRITE);
+
+    /* Wait for card to finish programming (busy = 0x00) */
+    SD_IO_WriteByte(SD_DUMMY_BYTE);
+    while (SD_IO_WriteByte(SD_DUMMY_BYTE) != 0xFF);
   }
+
   retr = BSP_SD_OK;
 
-error :
-  if(ptr != NULL) free(ptr);
+error:
   /* Send dummy byte: 8 Clock pulses of delay */
   SD_IO_CSState(1);
   SD_IO_WriteByte(SD_DUMMY_BYTE);
 
-  /* Return the reponse */
+  /* Return the response */
   return retr;
 }
 
@@ -770,6 +875,76 @@ uint8_t SD_GetCIDRegister(SD_CID* Cid)
 }
 
 /**
+  * @brief  Reads the 64-byte CMD6 switch function status block.
+  * @param  Arg: CMD6 argument.
+  * @param  Status: Pointer to a 64-byte switch status buffer.
+  * @retval SD status
+  */
+static uint8_t SD_ReadSwitchStatus(uint32_t Arg, uint8_t *Status)
+{
+  uint8_t retr = BSP_SD_ERROR;
+  uint16_t counter;
+  SD_CmdAnswer_typedef response;
+
+  response = SD_SendCmd(SD_CMD_SWITCH_FUNC, Arg, 0xFF, SD_ANSWER_R1_EXPECTED);
+  if (response.r1 == SD_R1_NO_ERROR)
+  {
+    if (SD_WaitData(SD_TOKEN_START_DATA_SINGLE_BLOCK_READ) == BSP_SD_OK)
+    {
+      for (counter = 0; counter < SD_SWITCH_STATUS_SIZE; counter++)
+      {
+        Status[counter] = SD_IO_WriteByte(SD_DUMMY_BYTE);
+      }
+
+      /* Discard CRC bytes. */
+      SD_IO_WriteByte(SD_DUMMY_BYTE);
+      SD_IO_WriteByte(SD_DUMMY_BYTE);
+
+      retr = BSP_SD_OK;
+    }
+  }
+
+  SD_IO_CSState(1);
+  SD_IO_WriteByte(SD_DUMMY_BYTE);
+
+  return retr;
+}
+
+/**
+  * @brief  Switches the card to SD high-speed mode using CMD6.
+  * @param  None
+  * @retval SD status
+  */
+static uint8_t SD_EnableHighSpeedMode(void)
+{
+  uint8_t status[SD_SWITCH_STATUS_SIZE];
+
+  if (SD_ReadSwitchStatus(SD_SWITCH_FUNC_CHECK_HIGH_SPEED, status) != BSP_SD_OK)
+  {
+    return BSP_SD_ERROR;
+  }
+
+  /* CMD6 status is MSB-first; byte 13 bit 1 advertises access mode function 1. */
+  if ((status[SD_SWITCH_STATUS_FG1_SUPPORT] & SD_SWITCH_FG1_HIGH_SPEED_SUPPORT) == 0U)
+  {
+    return BSP_SD_ERROR;
+  }
+
+  if (SD_ReadSwitchStatus(SD_SWITCH_FUNC_SET_HIGH_SPEED, status) != BSP_SD_OK)
+  {
+    return BSP_SD_ERROR;
+  }
+
+  if ((status[SD_SWITCH_STATUS_FG1_SELECTED] & SD_SWITCH_FG1_SELECTED_MASK) !=
+      SD_SWITCH_FG1_HIGH_SPEED_SELECTED)
+  {
+    return BSP_SD_ERROR;
+  }
+
+  return BSP_SD_OK;
+}
+
+/**
   * @brief  Sends 5 bytes command to the SD card and get response
   * @param  Cmd: The user expected command to send to SD card.
   * @param  Arg: The command argument.
@@ -834,6 +1009,46 @@ SD_CmdAnswer_typedef SD_SendCmd(uint8_t Cmd, uint32_t Arg, uint8_t Crc, uint8_t 
 }
 
 /**
+  * @brief  Stops an active multi-block read transaction.
+  * @param  Timeout: Timeout count while waiting for the card to become ready.
+  * @retval SD status
+  */
+static uint8_t SD_StopTransmission(uint32_t Timeout)
+{
+  uint8_t frame[SD_CMD_LENGTH], frameout[SD_CMD_LENGTH];
+  uint8_t response;
+
+  frame[0] = (SD_CMD_STOP_TRANSMISSION | 0x40);
+  frame[1] = 0x00;
+  frame[2] = 0x00;
+  frame[3] = 0x00;
+  frame[4] = 0x00;
+  frame[5] = 0xFF;
+
+  SD_IO_CSState(0);
+  SD_IO_WriteReadData(frame, frameout, SD_CMD_LENGTH);
+
+  /* CMD12 returns one stuff byte before the R1 response in SPI mode. */
+  SD_IO_WriteByte(SD_DUMMY_BYTE);
+
+  response = SD_ReadData();
+  if (response != SD_R1_NO_ERROR)
+  {
+    return BSP_SD_ERROR;
+  }
+
+  do
+  {
+    if (SD_IO_WriteByte(SD_DUMMY_BYTE) == SD_DUMMY_BYTE)
+    {
+      return BSP_SD_OK;
+    }
+  } while (Timeout-- != 0U);
+
+  return BSP_SD_TIMEOUT;
+}
+
+/**
   * @brief  Gets the SD card data response and check the busy flag.
   * @param  None
   * @retval The SD status: Read data response xxx0<status>1
@@ -876,6 +1091,36 @@ uint8_t SD_GetDataResponse(void)
 
   /* Return response */
   return rvalue;
+}
+
+/**
+  * @brief  Provides an SD ACMD23 pre-erase hint before a multi-block write.
+  * @param  BlockCount: Number of 512-byte blocks about to be written.
+  * @retval SD status
+  */
+static uint8_t SD_SetPreEraseBlockCount(uint32_t BlockCount)
+{
+  SD_CmdAnswer_typedef response;
+
+  /* ACMD23 is an optimization hint. Some cards do not support it, so callers
+     should ignore failure and continue with the write. */
+  response = SD_SendCmd(SD_CMD_APP_CMD, 0x00000000, 0xFF, SD_ANSWER_R1_EXPECTED);
+  SD_IO_CSState(1);
+  SD_IO_WriteByte(SD_DUMMY_BYTE);
+  if (response.r1 != SD_R1_NO_ERROR)
+  {
+    return BSP_SD_ERROR;
+  }
+
+  response = SD_SendCmd(SD_ACMD_SET_WR_BLK_ERASE_COUNT, BlockCount, 0xFF, SD_ANSWER_R1_EXPECTED);
+  SD_IO_CSState(1);
+  SD_IO_WriteByte(SD_DUMMY_BYTE);
+  if (response.r1 != SD_R1_NO_ERROR)
+  {
+    return BSP_SD_ERROR;
+  }
+
+  return BSP_SD_OK;
 }
 
 

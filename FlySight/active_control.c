@@ -27,6 +27,7 @@
 #include "app_common.h"
 #include "audio_control.h"
 #include "baro.h"
+#include "charge.h"
 #include "config.h"
 #include "custom_app.h"
 #include "gnss.h"
@@ -35,6 +36,9 @@
 #include "led.h"
 #include "log.h"
 #include "mag.h"
+#include "state.h"
+#include "rtc_util.h"
+#include "time.h"
 #include "vbat.h"
 
 #define LED_BLINK_MSEC      900
@@ -42,34 +46,54 @@
 
 static uint8_t led_timer_id;
 
-static volatile bool hasFix = false;
+static volatile bool hasFix;
+static volatile bool rtcUpdated;
 
 static volatile enum {
 	FS_CONTROL_INACTIVE = 0,
 	FS_CONTROL_ACTIVE
 } state = FS_CONTROL_INACTIVE;
 
-static void FS_Control_LED_Timer(void)
+static FS_GNSS_Time_t savedTime;
+
+void FS_ActiveControl_DataReady_Callback(void);
+void FS_ActiveControl_TimeReady_Callback(bool validTime);
+void FS_ActiveControl_RawReady_Callback(void);
+
+static void FS_ActiveControl_LED_Timer(void)
 {
 	// Turn on LED
 	FS_LED_On();
 }
 
-void FS_Control_Init(void)
+void FS_ActiveControl_Init(void)
 {
-	// Turn on green LED
+	// Set callback functions
+	FS_GNSS_DataReady_SetCallback(FS_ActiveControl_DataReady_Callback);
+	FS_GNSS_TimeReady_SetCallback(FS_ActiveControl_TimeReady_Callback);
+	FS_GNSS_RawReady_SetCallback(FS_ActiveControl_RawReady_Callback);
+	FS_GNSS_IntReady_SetCallback(NULL);
+
+	// Initialize LEDs
 	FS_LED_SetColour(FS_LED_GREEN);
 	FS_LED_On();
 
+	// Enable charging
+	FS_Charge_SetCurrent(FS_State_Get()->charge_current);
+
 	// Initialize LED timer
-	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &led_timer_id, hw_ts_SingleShot, FS_Control_LED_Timer);
+	HW_TS_Create(CFG_TIM_PROC_ID_ISR, &led_timer_id, hw_ts_SingleShot, FS_ActiveControl_LED_Timer);
 
 	// Initialize state
 	hasFix = false;
+	rtcUpdated = false;
 	state = FS_CONTROL_ACTIVE;
+
+	// Initialize saved GNSS time
+	memset(&savedTime, 0, sizeof(FS_GNSS_Time_t));
 }
 
-void FS_Control_DeInit(void)
+void FS_ActiveControl_DeInit(void)
 {
 	// Update state
 	state = FS_CONTROL_INACTIVE;
@@ -77,8 +101,17 @@ void FS_Control_DeInit(void)
 	// Delete timer
 	HW_TS_Delete(led_timer_id);
 
+	// Disable charging
+	FS_Charge_SetCurrent(FS_CHARGE_DISABLE);
+
 	// Turn off LEDs
 	FS_LED_Off();
+
+	// Clear callback functions
+	FS_GNSS_DataReady_SetCallback(NULL);
+	FS_GNSS_TimeReady_SetCallback(NULL);
+	FS_GNSS_RawReady_SetCallback(NULL);
+	FS_GNSS_IntReady_SetCallback(NULL);
 }
 
 void FS_Baro_DataReady_Callback(void)
@@ -114,7 +147,7 @@ void FS_Mag_DataReady_Callback(void)
 	}
 }
 
-void FS_GNSS_DataReady_Callback(void)
+void FS_ActiveControl_DataReady_Callback(void)
 {
 	const FS_GNSS_Data_t *data = FS_GNSS_GetData();
 
@@ -132,17 +165,16 @@ void FS_GNSS_DataReady_Callback(void)
 		FS_Log_WriteGNSSData(data);
 	}
 
-	if (Custom_APP_IsConnected())
-	{
-		// Update BLE characteristic
-		Custom_GNSS_Update(data);
-	}
+	// Update BLE characteristic
+	Custom_GNSS_Update(data);
 
 	hasFix = (data->gpsFix == 3);
 }
 
-void FS_GNSS_TimeReady_Callback(bool validTime)
+void FS_ActiveControl_TimeReady_Callback(bool validTime)
 {
+	const FS_GNSS_Time_t *gnssTime;
+
 	if (state != FS_CONTROL_ACTIVE) return;
 
 	if (hasFix)
@@ -152,14 +184,29 @@ void FS_GNSS_TimeReady_Callback(bool validTime)
 		HW_TS_Start(led_timer_id, LED_BLINK_TICKS);
 	}
 
-	if (validTime && FS_Config_Get()->enable_logging)
+	if (validTime)
 	{
-		// Save to log file
-		FS_Log_WriteGNSSTime(FS_GNSS_GetTime());
+		gnssTime = FS_GNSS_GetTime();
+
+		if (FS_Config_Get()->enable_logging)
+		{
+			// Save to log file
+			FS_Log_WriteGNSSTime(gnssTime);
+		}
+
+		// Update saved GNSS time
+		memcpy(&savedTime, gnssTime, sizeof(FS_GNSS_Time_t));
+
+		// Set RTC on first valid time with 3D fix
+		if (hasFix && !rtcUpdated)
+		{
+			FS_RTC_SetFromGNSS(&savedTime);
+			rtcUpdated = true;
+		}
 	}
 }
 
-void FS_GNSS_RawReady_Callback(void)
+void FS_ActiveControl_RawReady_Callback(void)
 {
 	if (state != FS_CONTROL_ACTIVE) return;
 
@@ -185,6 +232,19 @@ void FS_VBAT_ValueReady_Callback(void)
 {
 	if (state != FS_CONTROL_ACTIVE) return;
 
+	const FS_VBAT_Data_t *vbat_data = FS_VBAT_GetData();
+
 	// Save to log file
-	FS_Log_WriteVBATData(FS_VBAT_GetData());
+	FS_Log_WriteVBATData(vbat_data);
+
+	// Update BLE characteristic
+	Custom_VBAT_Update(vbat_data);
+}
+
+void FS_ActiveControl_SetHealthStatus(bool isSystemHealthy)
+{
+	if (state != FS_CONTROL_ACTIVE) return;
+
+	// Set LED color based on system health from initialization
+	FS_LED_SetColour(isSystemHealthy ? FS_LED_GREEN : FS_LED_RED);
 }

@@ -57,7 +57,7 @@
  */
 #define BLE_CFG_SVC_MAX_NBR_CB                                                 7
 
-#define BLE_CFG_CLT_MAX_NBR_CB                                                 1
+#define BLE_CFG_CLT_MAX_NBR_CB                                                 6
 
 /******************************************************************************
  * GAP Service - Appearance

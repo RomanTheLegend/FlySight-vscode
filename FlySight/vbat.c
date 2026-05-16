@@ -23,6 +23,9 @@
 
 #include "main.h"
 #include "app_common.h"
+#include "log.h"
+#include "sensor_time.h"
+#include "stm32_seq.h"
 #include "vbat.h"
 
 #define VBAT_TIMER_MSEC     1000
@@ -59,6 +62,26 @@ extern ADC_HandleTypeDef hadc1;
 
 static FS_VBAT_Data_t vbatData;
 
+// Error logging
+static volatile uint32_t vbat_error_code;
+
+void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
+{
+	vbat_error_code = hadc->ErrorCode;
+
+	// Check for a recoverable overrun error.
+	if (vbat_error_code & HAL_ADC_ERROR_OVR)
+	{
+		// This is non-fatal. We will log it and the timer will attempt another conversion.
+		FS_Log_WriteEventAsync("ADC non-fatal error: 0x%lX", vbat_error_code);
+	}
+	else
+	{
+		// Any other error (especially DMA or Internal) is critical and unrecoverable.
+		Error_Handler();
+	}
+}
+
 static void FS_VBAT_Timer(void)
 {
 	// Enable battery measurement
@@ -81,13 +104,14 @@ void FS_VBAT_DeInit(void)
 	HW_TS_Delete(vbat_timer_id);
 }
 
+
 void FS_VBAT_ConversionComplete(void)
 {
 	// Disable battery measurement
 	HAL_GPIO_WritePin(VBAT_EN_GPIO_Port, VBAT_EN_Pin, GPIO_PIN_RESET);
 
 	// Get battery voltage
-	vbatData.time = HAL_GetTick();
+	vbatData.time = FS_SensorTime_GetTicks();
 	uint16_t temp = HAL_ADC_GetValue(&hadc1);
 	vbatData.voltage = __ADC_CALC_DATA_VOLTAGE(VDDA_APPLI, temp * 2);
 

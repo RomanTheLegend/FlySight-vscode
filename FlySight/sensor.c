@@ -25,6 +25,7 @@
 
 #include "main.h"
 #include "app_common.h"
+#include "log.h"
 #include "stm32_seq.h"
 
 #define HANDLER_COUNT 4
@@ -42,7 +43,9 @@ static volatile bool busy = false;
 typedef enum
 {
 	Operation_Read,
-	Operation_Write
+	Operation_Write,
+	Operation_Recieve,
+	Operation_Transmit
 } Operation_t;
 
 typedef struct
@@ -93,7 +96,7 @@ void FS_Sensor_Stop(void)
 static void BeginRead(void)
 {
 	Handler_t *h = &handlerBuf[handlerRdI % HANDLER_COUNT];
-	HAL_StatusTypeDef result;
+	HAL_StatusTypeDef result = HAL_ERROR;
 
 	busy = true;
 
@@ -101,9 +104,21 @@ static void BeginRead(void)
 	{
 		result = HAL_I2C_Mem_Read_DMA(&hi2c3, h->addr, h->reg, 1, h->pData, h->size);
 	}
-	else
+	else if (h->op == Operation_Write)
 	{
 		result = HAL_I2C_Mem_Write_DMA(&hi2c3, h->addr, h->reg, 1, h->pData, h->size);
+	}
+	else if (h->op == Operation_Recieve)
+	{
+		result = HAL_I2C_Master_Receive_DMA(&hi2c3, h->addr, h->pData, h->size);
+	}
+	else if (h->op == Operation_Transmit)
+	{
+		result = HAL_I2C_Master_Transmit_DMA(&hi2c3, h->addr, h->pData, h->size);
+	}
+	else
+	{
+		Error_Handler(); // Should never be called
 	}
 
 	if (result != HAL_OK)
@@ -136,112 +151,176 @@ static void NextHandler(HAL_StatusTypeDef result)
 	}
 }
 
-void FS_Sensor_WriteAsync(uint8_t addr, uint16_t reg, uint8_t *pData, uint16_t size, void (*Callback)(HAL_StatusTypeDef))
+static HAL_StatusTypeDef FS_Sensor_Enqueue(
+		Operation_t op,
+		uint8_t addr,
+		uint16_t reg,
+		uint8_t *pData,
+		uint16_t size,
+		void (*Callback)(HAL_StatusTypeDef))
 {
-	Handler_t *h = &handlerBuf[handlerWrI % HANDLER_COUNT];
-	uint32_t primask_bit;
-	bool begin;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
 
-	// Initialize handler
-	h->op = Operation_Write;
-	h->addr = addr;
-	h->reg = reg;
-	h->pData = pData;
-	h->size = size;
-	h->Callback = Callback;
+    // Check full *inside* the critical section
+    if ((handlerWrI - handlerRdI) >= HANDLER_COUNT) {
+        __set_PRIMASK(primask);
+        FS_Log_WriteEventAsync("Sensor data overrun");
+        return HAL_ERROR;
+    }
 
-	primask_bit = __get_PRIMASK();
-	__disable_irq();
+    // Reserve slot and fill it atomically
+    uint32_t idx = handlerWrI % HANDLER_COUNT;
+    handlerBuf[idx].op       = op;
+    handlerBuf[idx].addr     = addr;
+    handlerBuf[idx].reg      = reg;
+    handlerBuf[idx].pData    = pData;
+    handlerBuf[idx].size     = size;
+    handlerBuf[idx].Callback = Callback;
 
-	++handlerWrI;
-	begin = (mode == MODE_ACTIVE) && !busy;
+    handlerWrI++;
 
-	__set_PRIMASK(primask_bit);
+    // Decide whether to kick the engine now and reserve the bus
+    bool start_now = (mode == MODE_ACTIVE) && !busy;
+    if (start_now) {
+        busy = true;  // reserve bus so no second producer calls BeginRead()
+    }
 
-	if (begin)
-	{
-		BeginRead();
-	}
+    __set_PRIMASK(primask);
+
+    if (start_now) {
+        BeginRead();  // OK if BeginRead() sets busy again; harmless
+    }
+
+    return HAL_OK;
 }
 
-void FS_Sensor_ReadAsync(uint8_t addr, uint16_t reg, uint8_t *pData, uint16_t size, void (*Callback)(HAL_StatusTypeDef))
+HAL_StatusTypeDef FS_Sensor_TransmitAsync(
+		uint8_t addr,
+		uint8_t *pData,
+		uint16_t size,
+		void (*Callback)(HAL_StatusTypeDef))
 {
-	Handler_t *h = &handlerBuf[handlerWrI % HANDLER_COUNT];
-	uint32_t primask_bit;
-	bool begin;
-
-	// Initialize handler
-	h->op = Operation_Read;
-	h->addr = addr;
-	h->reg = reg;
-	h->pData = pData;
-	h->size = size;
-	h->Callback = Callback;
-
-	primask_bit = __get_PRIMASK();
-	__disable_irq();
-
-	++handlerWrI;
-	begin = (mode == MODE_ACTIVE) && !busy;
-
-	__set_PRIMASK(primask_bit);
-
-	if (begin)
-	{
-		BeginRead();
-	}
+    return FS_Sensor_Enqueue(Operation_Transmit, addr, 0, pData, size, Callback);
 }
 
-HAL_StatusTypeDef FS_Sensor_Write(uint8_t addr, uint16_t reg, uint8_t *pData, uint16_t size)
+HAL_StatusTypeDef FS_Sensor_ReceiveAsync(
+		uint8_t addr,
+		uint8_t *pData,
+		uint16_t size,
+		void (*Callback)(HAL_StatusTypeDef))
 {
-	HAL_StatusTypeDef result;
+    return FS_Sensor_Enqueue(Operation_Recieve, addr, 0, pData, size, Callback);
+}
+
+HAL_StatusTypeDef FS_Sensor_WriteAsync(
+		uint8_t addr,
+		uint16_t reg,
+		uint8_t *pData,
+		uint16_t size,
+		void (*Callback)(HAL_StatusTypeDef))
+{
+    return FS_Sensor_Enqueue(Operation_Write, addr, reg, pData, size, Callback);
+}
+
+HAL_StatusTypeDef FS_Sensor_ReadAsync(
+		uint8_t addr,
+		uint16_t reg,
+		uint8_t *pData,
+		uint16_t size,
+		void (*Callback)(HAL_StatusTypeDef))
+{
+    return FS_Sensor_Enqueue(Operation_Read, addr, reg, pData, size, Callback);
+}
+
+HAL_StatusTypeDef FS_Sensor_Transmit(uint8_t addr, uint8_t *pData, uint16_t size)
+{
+	HAL_StatusTypeDef result = HAL_ERROR;
 	uint32_t ms;
 
-	if (mode == MODE_ACTIVE)
-	{
-		return HAL_ERROR;
-	}
-	else
+	if (mode == MODE_INACTIVE)
 	{
 		ms = HAL_GetTick();
 		do
 		{
 			if (HAL_GetTick() - ms > TIMEOUT)
 			{
-				Error_Handler();
+				return HAL_TIMEOUT;
+			}
+
+			result = HAL_I2C_Master_Transmit(&hi2c3, addr, pData, size, TIMEOUT);
+		}
+		while (result != HAL_OK);
+	}
+
+	return result;
+}
+
+HAL_StatusTypeDef FS_Sensor_Receive(uint8_t addr, uint8_t *pData, uint16_t size)
+{
+	HAL_StatusTypeDef result = HAL_ERROR;
+	uint32_t ms;
+
+	if (mode == MODE_INACTIVE)
+	{
+		ms = HAL_GetTick();
+		do
+		{
+			if (HAL_GetTick() - ms > TIMEOUT)
+			{
+				return HAL_TIMEOUT;
+			}
+
+			result = HAL_I2C_Master_Receive(&hi2c3, addr, pData, size, TIMEOUT);
+		}
+		while (result != HAL_OK);
+	}
+
+	return result;
+}
+
+HAL_StatusTypeDef FS_Sensor_Write(uint8_t addr, uint16_t reg, uint8_t *pData, uint16_t size)
+{
+	HAL_StatusTypeDef result = HAL_ERROR;
+	uint32_t ms;
+
+	if (mode == MODE_INACTIVE)
+	{
+		ms = HAL_GetTick();
+		do
+		{
+			if (HAL_GetTick() - ms > TIMEOUT)
+			{
+				return HAL_TIMEOUT;
 			}
 
 			result = HAL_I2C_Mem_Write(&hi2c3, addr, reg, 1, pData, size, TIMEOUT);
 		}
 		while (result != HAL_OK);
-
-		return result;
 	}
+
+	return result;
 }
 
 HAL_StatusTypeDef FS_Sensor_Read(uint8_t addr, uint16_t reg, uint8_t *pData, uint16_t size)
 {
-	HAL_StatusTypeDef result;
+	HAL_StatusTypeDef result = HAL_ERROR;
 	uint32_t ms;
 
-	if (mode == MODE_ACTIVE)
-	{
-		return HAL_ERROR;
-	}
-	else
+	if (mode == MODE_INACTIVE)
 	{
 		ms = HAL_GetTick();
 		do
 		{
 			if (HAL_GetTick() - ms > TIMEOUT)
 			{
-				Error_Handler();
+				return HAL_TIMEOUT;
 			}
 
 			result = HAL_I2C_Mem_Read(&hi2c3, addr, reg, 1, pData, size, TIMEOUT);
 		}
 		while (result != HAL_OK);
-
-		return result;
 	}
+
+	return result;
 }

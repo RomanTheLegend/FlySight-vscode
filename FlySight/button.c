@@ -24,7 +24,6 @@
 #include <stdbool.h>
 
 #include "main.h"
-#include "app_ble.h"
 #include "app_common.h"
 #include "stm32_seq.h"
 #include "button.h"
@@ -37,11 +36,12 @@
 
 typedef enum
 {
-	FS_BUTTON_RELEASED = 0,
+	FS_BUTTON_INIT = 0,
+	FS_BUTTON_RELEASED,
 	FS_BUTTON_PRESSED
 } FS_Button_State_t;
 
-static FS_Button_State_t state;
+static FS_Button_State_t state = FS_BUTTON_INIT;
 static volatile uint8_t count;
 static uint8_t timer_id;
 static volatile bool busy;
@@ -84,9 +84,6 @@ static void FS_Button_Timer(void)
 		{
 			// Update mode
 			FS_Mode_PushQueue(FS_MODE_EVENT_BUTTON_PRESSED);
-
-			// Start fast advertising
-			APP_BLE_Adv_Set(APP_BLE_FAST_ADV);
 		}
 
 		// Stop debounce timer
@@ -99,6 +96,7 @@ static void FS_Button_Timer(void)
 
 void FS_Button_Triggered(void)
 {
+	if (state == FS_BUTTON_INIT) return;
 	if (busy) return;
 
 	// Disable external interrupt

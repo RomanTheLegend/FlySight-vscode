@@ -26,13 +26,13 @@
 
 typedef struct
 {
-	uint32_t time;			// ms
+	uint64_t time;			// us
 	uint16_t humidity;		// rH % * 10
 	uint16_t temperature;	// degrees C * 10
 } FS_Hum_Data_t;
 
 void FS_Hum_Init(void);
-void FS_Hum_Start(void);
+HAL_StatusTypeDef FS_Hum_Start(void);
 void FS_Hum_Stop(void);
 void FS_Hum_Read(void);
 const FS_Hum_Data_t *FS_Hum_GetData(void);

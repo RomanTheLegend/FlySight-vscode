@@ -28,31 +28,66 @@ extern "C" {
 
 /* Includes ------------------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdbool.h>
+#include "ble_types.h"
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
 typedef enum
 {
-  /* CRS */
-  CUSTOM_STM_CRS_TX,
-  CUSTOM_STM_CRS_RX,
-  /* GNSS */
-  CUSTOM_STM_GNSS_PV,
+  /* File_Transfer */
+  CUSTOM_STM_FT_PACKET_OUT,
+  CUSTOM_STM_FT_PACKET_IN,
+  /* Sensor_Data */
+  CUSTOM_STM_SD_GNSS_MEASUREMENT,
+  CUSTOM_STM_SD_CONTROL_POINT,
+  /* Starter_Pistol */
+  CUSTOM_STM_SP_CONTROL_POINT,
+  CUSTOM_STM_SP_RESULT,
+  /* Device_State */
+  CUSTOM_STM_DS_MODE,
+  CUSTOM_STM_DS_CONTROL_POINT,
+  /* Battery */
+  CUSTOM_STM_BATTERY_LEVEL,
 } Custom_STM_Char_Opcode_t;
 
 typedef enum
 {
-  /* CRS_TX */
-  CUSTOM_STM_CRS_TX_NOTIFY_ENABLED_EVT,
-  CUSTOM_STM_CRS_TX_NOTIFY_DISABLED_EVT,
-  /* CRS_RX */
-  CUSTOM_STM_CRS_RX_READ_EVT,
-  CUSTOM_STM_CRS_RX_WRITE_NO_RESP_EVT,
-  /* GNSS_PV */
-  CUSTOM_STM_GNSS_PV_READ_EVT,
-  CUSTOM_STM_GNSS_PV_NOTIFY_ENABLED_EVT,
-  CUSTOM_STM_GNSS_PV_NOTIFY_DISABLED_EVT,
+  /* FT_Packet_Out */
+  CUSTOM_STM_FT_PACKET_OUT_NOTIFY_ENABLED_EVT,
+  CUSTOM_STM_FT_PACKET_OUT_NOTIFY_DISABLED_EVT,
+  /* FT_Packet_In */
+  CUSTOM_STM_FT_PACKET_IN_READ_EVT,
+  CUSTOM_STM_FT_PACKET_IN_WRITE_NO_RESP_EVT,
+  /* SD_GNSS_Measurement */
+  CUSTOM_STM_SD_GNSS_MEASUREMENT_READ_EVT,
+  CUSTOM_STM_SD_GNSS_MEASUREMENT_NOTIFY_ENABLED_EVT,
+  CUSTOM_STM_SD_GNSS_MEASUREMENT_NOTIFY_DISABLED_EVT,
+  /* SD_Control_Point */
+  CUSTOM_STM_SD_CONTROL_POINT_WRITE_EVT,
+  CUSTOM_STM_SD_CONTROL_POINT_INDICATE_ENABLED_EVT,
+  CUSTOM_STM_SD_CONTROL_POINT_INDICATE_DISABLED_EVT,
+  /* SP_Control_Point */
+  CUSTOM_STM_SP_CONTROL_POINT_WRITE_EVT,
+  CUSTOM_STM_SP_CONTROL_POINT_INDICATE_ENABLED_EVT,
+  CUSTOM_STM_SP_CONTROL_POINT_INDICATE_DISABLED_EVT,
+  /* SP_Result */
+  CUSTOM_STM_SP_RESULT_READ_EVT,
+  CUSTOM_STM_SP_RESULT_INDICATE_ENABLED_EVT,
+  CUSTOM_STM_SP_RESULT_INDICATE_DISABLED_EVT,
+  /* DS_Mode */
+  CUSTOM_STM_DS_MODE_READ_EVT,
+  CUSTOM_STM_DS_MODE_INDICATE_ENABLED_EVT,
+  CUSTOM_STM_DS_MODE_INDICATE_DISABLED_EVT,
+  /* DS_Control_Point */
+  CUSTOM_STM_DS_CONTROL_POINT_WRITE_EVT,
+  CUSTOM_STM_DS_CONTROL_POINT_INDICATE_ENABLED_EVT,
+  CUSTOM_STM_DS_CONTROL_POINT_INDICATE_DISABLED_EVT,
+  /* Battery_Level */
+  CUSTOM_STM_BATTERY_LEVEL_READ_EVT,
+  CUSTOM_STM_BATTERY_LEVEL_NOTIFY_ENABLED_EVT,
+  CUSTOM_STM_BATTERY_LEVEL_NOTIFY_DISABLED_EVT,
+  CUSTOM_STM_NOTIFICATION_COMPLETE_EVT,
 
   CUSTOM_STM_BOOT_REQUEST_EVT
 } Custom_STM_Opcode_evt_t;
@@ -69,6 +104,7 @@ typedef struct
   Custom_STM_Data_t             DataTransfered;
   uint16_t                      ConnectionHandle;
   uint8_t                       ServiceInstance;
+  uint16_t                      AttrHandle;
 } Custom_STM_App_Notification_evt_t;
 
 /* USER CODE BEGIN ET */
@@ -76,9 +112,15 @@ typedef struct
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
-extern uint8_t SizeCrs_Tx;
-extern uint8_t SizeCrs_Rx;
-extern uint8_t SizeGnss_Pv;
+extern uint8_t SizeFt_Packet_Out;
+extern uint8_t SizeFt_Packet_In;
+extern uint8_t SizeSd_Gnss_Measurement;
+extern uint8_t SizeSd_Control_Point;
+extern uint8_t SizeSp_Control_Point;
+extern uint8_t SizeSp_Result;
+extern uint8_t SizeDs_Mode;
+extern uint8_t SizeDs_Control_Point;
+extern uint8_t SizeBattery_Level;
 
 /* USER CODE BEGIN EC */
 
@@ -99,6 +141,7 @@ void SVCCTL_InitCustomSvc(void);
 void Custom_STM_App_Notification(Custom_STM_App_Notification_evt_t *pNotification);
 tBleStatus Custom_STM_App_Update_Char(Custom_STM_Char_Opcode_t CharOpcode,  uint8_t *pPayload);
 /* USER CODE BEGIN EF */
+bool Custom_STM_IsDsControlPointNotificationComplete(uint16_t attr_handle);
 
 /* USER CODE END EF */
 

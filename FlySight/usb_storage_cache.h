@@ -21,10 +21,18 @@
 **  Website: http://flysight.ca/                                          **
 ****************************************************************************/
 
-#ifndef CONTROL_H_
-#define CONTROL_H_
+#ifndef USB_STORAGE_CACHE_H_
+#define USB_STORAGE_CACHE_H_
 
-void FS_Control_Init(void);
-void FS_Control_DeInit(void);
+#include <stdint.h>
 
-#endif /* CONTROL_H_ */
+int8_t FS_USBStorageCache_Init(void);
+int8_t FS_USBStorageCache_DeInit(void);
+void FS_USBStorageCache_Reset(void);
+void FS_USBStorageCache_SetCapacity(uint32_t block_count);
+void FS_USBStorageCache_SetActivityCallbacks(void (*begin)(void), void (*end)(void));
+int8_t FS_USBStorageCache_Read(uint8_t *buf, uint32_t blk_addr, uint16_t blk_len);
+int8_t FS_USBStorageCache_Write(uint8_t *buf, uint32_t blk_addr, uint16_t blk_len);
+int8_t FS_USBStorageCache_Flush(void);
+
+#endif /* USB_STORAGE_CACHE_H_ */

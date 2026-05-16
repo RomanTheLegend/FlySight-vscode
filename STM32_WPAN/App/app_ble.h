@@ -47,16 +47,8 @@ typedef enum
   APP_BLE_FAST_ADV,
   APP_BLE_LP_ADV,
   APP_BLE_SCAN,
-  APP_BLE_LP_CONNECTING,
-  APP_BLE_CONNECTED_SERVER,
-  APP_BLE_CONNECTED_CLIENT,
-
-  APP_BLE_DISCOVER_SERVICES,
-  APP_BLE_DISCOVER_CHARACS,
-  APP_BLE_DISCOVER_WRITE_DESC,
-  APP_BLE_DISCOVER_NOTIFICATION_CHAR_DESC,
-  APP_BLE_ENABLE_NOTIFICATION_DESC,
-  APP_BLE_DISABLE_NOTIFICATION_DESC
+  APP_BLE_CONNECTING,
+  APP_BLE_CONNECTED
 } APP_BLE_ConnStatus_t;
 
 /* USER CODE BEGIN ET */
@@ -81,9 +73,13 @@ typedef enum
 /* Exported functions ---------------------------------------------*/
 void APP_BLE_Init(void);
 APP_BLE_ConnStatus_t APP_BLE_Get_Server_Connection_Status(void);
+APP_BLE_ConnStatus_t APP_BLE_Get_Client_Connection_Status(uint16_t Connection_Handle);
 
 /* USER CODE BEGIN EF */
-void APP_BLE_Adv_Set(APP_BLE_ConnStatus_t NewStatus);
+void APP_BLE_RequestPairing(void (*Callback)(void));
+void APP_BLE_CancelPairing(void);
+void APP_BLE_UpdateDeviceName(void);
+void APP_BLE_Reset(void);
 /* USER CODE END EF */
 
 #ifdef __cplusplus

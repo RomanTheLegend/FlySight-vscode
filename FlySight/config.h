@@ -29,12 +29,43 @@
 #define FS_CONFIG_MAX_ALARMS    20
 #define FS_CONFIG_MAX_WINDOWS   2
 #define FS_CONFIG_MAX_SPEECH    3
+#define FS_CONFIG_MAX_AL_LINES  4
+
+#define FS_CONFIG_MODEL_PORTABLE     0
+#define FS_CONFIG_MODEL_STATIONARY   2
+#define FS_CONFIG_MODEL_PEDESTRIAN   3
+#define FS_CONFIG_MODEL_AUTOMOTIVE   4
+#define FS_CONFIG_MODEL_SEA          5
+#define FS_CONFIG_MODEL_AIRBORNE_1G  6
+#define FS_CONFIG_MODEL_AIRBORNE_2G  7
+#define FS_CONFIG_MODEL_AIRBORNE_4G  8
+
+#define FS_CONFIG_MODE_HORIZONTAL_SPEED          0
+#define FS_CONFIG_MODE_VERTICAL_SPEED            1
+#define FS_CONFIG_MODE_GLIDE_RATIO               2
+#define FS_CONFIG_MODE_INVERSE_GLIDE_RATIO       3
+#define FS_CONFIG_MODE_TOTAL_SPEED               4
+#define FS_CONFIG_MODE_DIRECTION_TO_DESTINATION  5
+#define FS_CONFIG_MODE_DISTANCE_TO_DESTINATION   6
+#define FS_CONFIG_MODE_DIRECTION_TO_BEARING      7
+#define FS_CONFIG_MODE_MAGNITUDE_OF_VALUE_1      8
+#define FS_CONFIG_MODE_CHANGE_IN_VALUE_1         9
+#define FS_CONFIG_MODE_LEFT_RIGHT                10
+#define FS_CONFIG_MODE_DIVE_ANGLE                11
+#define FS_CONFIG_MODE_ALTITUDE                  12
 
 #define FS_CONFIG_UNITS_KMH     0
 #define FS_CONFIG_UNITS_MPH     1
+#define FS_CONFIG_UNITS_KNOTS   2
 
 #define FS_CONFIG_UNITS_METERS  0
 #define FS_CONFIG_UNITS_FEET    1
+#define FS_CONFIG_UNITS_NM      2
+
+typedef enum {
+    FS_UNIT_SYSTEM_METRIC = 0,
+    FS_UNIT_SYSTEM_IMPERIAL = 1
+} FS_Config_UnitSystem_t;
 
 #define FS_CONFIG_RATE_ONE_HZ   650
 #define FS_CONFIG_RATE_FLATLINE UINT16_MAX
@@ -58,6 +89,13 @@ typedef struct
 	uint8_t units;
 	int32_t decimals;
 } FS_Config_Speech_t;
+
+typedef struct
+{
+	uint8_t mode;
+	FS_Config_UnitSystem_t units;
+	int32_t decimals;
+} FS_Config_AL_Line_t;
 
 typedef struct
 {
@@ -114,10 +152,34 @@ typedef struct
 	uint8_t  enable_baro;
 	uint8_t  enable_hum;
 	uint8_t  enable_mag;
-	uint8_t  enable_ble;
 	uint8_t  ble_tx_power;
 	uint8_t  enable_raw;
 	uint8_t  cold_start;
+
+	uint8_t  baro_odr;
+	uint8_t  hum_odr;
+	uint8_t  mag_odr;
+	uint8_t  accel_odr;
+	uint8_t  accel_fs;
+	uint8_t  gyro_odr;
+	uint8_t  gyro_fs;
+
+	int32_t  lat;
+	int32_t  lon;
+	int16_t  bearing;
+	uint16_t end_nav;
+	uint16_t max_dist;
+	uint16_t min_angle;
+
+	char     al_id[6];
+	uint8_t  al_mode;
+	uint32_t al_rate;
+
+	FS_Config_AL_Line_t al_lines[FS_CONFIG_MAX_AL_LINES];
+	uint8_t  num_al_lines;
+
+	// Flag to control whether navigation modes are allowed
+	uint8_t  enable_nav;
 } FS_Config_Data_t;
 
 typedef enum {
