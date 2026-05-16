@@ -68,6 +68,7 @@ target_sources(${BUILD_UNIT_0_NAME} PRIVATE
     "FlySight/active_mode.c"
     "FlySight/activelook.c"
     "FlySight/activelook_mode0.c"
+    "FlySight/activelook_mode1.c"
     "FlySight/audio.c"
     "FlySight/audio_control.c"
     "FlySight/baro.c"

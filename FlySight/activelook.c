@@ -2,6 +2,7 @@
 #include "activelook.h"
 #include "activelook_client.h"
 #include "activelook_mode0.h"
+#include "activelook_mode1.h"
 #include "app_common.h"
 #include "config.h"
 #include "dbg_trace.h"
@@ -47,12 +48,16 @@ typedef struct {
 
 static const FS_ActiveLook_ModeOps s_modeTable[] =
 {
-   { // mode 0
+   { // mode 0 (al_mode = 1): configurable flight data lines
         FS_ActiveLook_Mode0_Init,
         FS_ActiveLook_Mode0_Setup,
         FS_ActiveLook_Mode0_Update
    },
-   // etc
+   { // mode 1 (al_mode = 2): competition mode with lane deviation arrows
+        FS_ActiveLook_Mode1_Init,
+        FS_ActiveLook_Mode1_Setup,
+        FS_ActiveLook_Mode1_Update
+   },
 };
 
 #define FS_ACTIVELOOK_NUM_MODES (sizeof(s_modeTable)/sizeof(s_modeTable[0]))
