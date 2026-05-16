@@ -22,14 +22,14 @@
 ****************************************************************************/
 
 #include "main.h"
+#include "active_control.h"
+#include "activelook.h"
 #include "app_common.h"
 #include "app_fatfs.h"
 #include "audio.h"
 #include "audio_control.h"
-#include "activelook_control.h"
 #include "baro.h"
 #include "config.h"
-#include "control.h"
 #include "gnss.h"
 #include "hum.h"
 #include "imu.h"
@@ -37,8 +37,8 @@
 #include "mag.h"
 #include "resource_manager.h"
 #include "sensor.h"
+#include "sensor_time.h"
 #include "state.h"
-#include "stm32_seq.h"
 #include "vbat.h"
 
 extern UART_HandleTypeDef huart1;
@@ -46,21 +46,21 @@ extern ADC_HandleTypeDef hadc1;
 
 void FS_ActiveMode_Init(void)
 {
-	/* Begin discovery */
-	UTIL_SEQ_SetTask(1<<CFG_TASK_START_SCAN_ID, CFG_SCH_PRIO_0);
-
-	/* Initialize controller */
-	FS_Control_Init();
-
-	/* Enable charging */
-	HAL_GPIO_WritePin(CHG_EN_LO_GPIO_Port, CHG_EN_LO_Pin, GPIO_PIN_RESET);
-	HAL_GPIO_WritePin(CHG_EN_HI_GPIO_Port, CHG_EN_HI_Pin, GPIO_PIN_SET);
+	uint8_t enable_flags;
+	bool isSystemHealthy = true;
 
 	/* Initialize FatFS */
 	FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS);
 
 	/* Read persistent state */
-	FS_State_Init();
+	FS_State_NextSession();
+
+	/* Initialize controller */
+	FS_ActiveControl_Init();
+
+	/* Initialize and start microsecond sensor timer */
+	FS_SensorTime_Init();
+	FS_SensorTime_Start();
 
 	/* Initialize configuration */
 	FS_Config_Init();
@@ -75,22 +75,52 @@ void FS_ActiveMode_Init(void)
 		FS_Config_Read(FS_State_Get()->config_filename);
 	}
 
+	if (FS_Config_Get()->al_mode != 0)
+	{
+		/* Initialize ActiveLook interface */
+		FS_ActiveLook_Init();
+	}
+
 	if (FS_Config_Get()->enable_logging)
 	{
+		// Initialize enable flags
+		enable_flags = FS_LOG_ENABLE_EVENT;
+		if (FS_Config_Get()->enable_gnss) enable_flags |= FS_LOG_ENABLE_GNSS;
+		if (FS_Config_Get()->enable_baro) enable_flags |= FS_LOG_ENABLE_SENSOR;
+		if (FS_Config_Get()->enable_hum)  enable_flags |= FS_LOG_ENABLE_SENSOR;
+		if (FS_Config_Get()->enable_imu)  enable_flags |= FS_LOG_ENABLE_SENSOR;
+		if (FS_Config_Get()->enable_mag)  enable_flags |= FS_LOG_ENABLE_SENSOR;
+		if (FS_Config_Get()->enable_vbat) enable_flags |= FS_LOG_ENABLE_SENSOR;
+		if (FS_Config_Get()->enable_raw)  enable_flags |= FS_LOG_ENABLE_RAW;
+
 		// Enable logging
-		FS_Log_Init(FS_State_Get()->temp_folder);
+		if (FS_Log_Init(FS_State_Get()->temp_folder, enable_flags) != HAL_OK)
+		{
+			isSystemHealthy = false;
+			// We cannot log this failure, as logging init itself has failed.
+			// The red LED will be the indicator.
+		}
+
+		// Log timer usage adjusted for:
+		//   - FS_ActiveControl_Init (1)
+		//   - FS_Log_Init (1)
+		FS_Log_WriteEvent("%lu/%lu timers used before active mode initialization",
+				HW_TS_CountUsed() - 2, CFG_HW_TS_MAX_NBR_CONCURRENT_TIMER);
+		FS_Log_WriteEvent("----------");
 	}
 
 	if (FS_Config_Get()->enable_audio)
 	{
 		/* Initialize audio */
-		FS_Audio_Init();
+		if (FS_Audio_Init() != HAL_OK)
+		{
+			isSystemHealthy = false;
+			FS_Log_WriteEvent("Audio init failed");
+		}
 
 		// Enable audio control
 		FS_AudioControl_Init();
 	}
-
-	FS_ActivelookControl_Init();
 
 	if (FS_Config_Get()->enable_vbat || FS_Config_Get()->enable_mic)
 	{
@@ -100,8 +130,8 @@ void FS_ActiveMode_Init(void)
 		// Run the ADC calibration in single-ended mode
 		if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK)
 		{
-			// Calibration Error
-			Error_Handler();
+			isSystemHealthy = false;
+			FS_Log_WriteEvent("ADC calibration failed");
 		}
 	}
 
@@ -115,12 +145,6 @@ void FS_ActiveMode_Init(void)
 	{
 		// Enable microphone
 		HAL_GPIO_WritePin(MIC_EN_GPIO_Port, MIC_EN_Pin, GPIO_PIN_SET);
-	}
-
-	if (FS_Config_Get()->enable_imu)
-	{
-		/* Start IMU */
-		FS_IMU_Start();
 	}
 
 	/* Enable USART */
@@ -143,19 +167,31 @@ void FS_ActiveMode_Init(void)
 	if (FS_Config_Get()->enable_baro)
 	{
 		/* Start barometer */
-		FS_Baro_Start();
+		if (FS_Baro_Start() != HAL_OK)
+		{
+			isSystemHealthy = false;
+			FS_Log_WriteEvent("Barometer start failed");
+		}
 	}
 
 	if (FS_Config_Get()->enable_hum)
 	{
 		/* Start humidity and temperature */
-		FS_Hum_Start();
+		if (FS_Hum_Start() != HAL_OK)
+		{
+			isSystemHealthy = false;
+			FS_Log_WriteEvent("Humidity sensor start failed");
+		}
 	}
 
 	if (FS_Config_Get()->enable_mag)
 	{
 		/* Start magnetometer */
-		FS_Mag_Start();
+		if (FS_Mag_Start() != HAL_OK)
+		{
+			isSystemHealthy = false;
+			FS_Log_WriteEvent("Magnetometer start failed");
+		}
 	}
 
 	if (FS_Config_Get()->enable_baro || FS_Config_Get()->enable_hum || FS_Config_Get()->enable_mag)
@@ -163,12 +199,37 @@ void FS_ActiveMode_Init(void)
 		/* Start reading sensors */
 		FS_Sensor_Start();
 	}
+
+	if (FS_Config_Get()->enable_imu)
+	{
+		/* Start IMU */
+		if (FS_IMU_Start() != HAL_OK)
+		{
+			isSystemHealthy = false;
+			FS_Log_WriteEvent("IMU start failed");
+		}
+	}
+
+	/* Set the final health status */
+	FS_ActiveControl_SetHealthStatus(isSystemHealthy);
 }
 
 void FS_ActiveMode_DeInit(void)
 {
+	if (FS_Config_Get()->al_mode != 0)
+	{
+		/* De-initialize ActiveLook interface */
+		FS_ActiveLook_DeInit();
+	}
+
 	/* Disable controller */
-	FS_Control_DeInit();
+	FS_ActiveControl_DeInit();
+
+	if (FS_Config_Get()->enable_imu)
+	{
+		/* Stop IMU */
+		FS_IMU_Stop();
+	}
 
 	if (FS_Config_Get()->enable_baro || FS_Config_Get()->enable_hum || FS_Config_Get()->enable_mag)
 	{
@@ -200,12 +261,6 @@ void FS_ActiveMode_DeInit(void)
 	/* Disable USART */
 	HAL_UART_DeInit(&huart1);
 
-	if (FS_Config_Get()->enable_imu)
-	{
-		/* Stop IMU */
-		FS_IMU_Stop();
-	}
-
 	if (FS_Config_Get()->enable_mic)
 	{
 		// Disable microphone
@@ -223,11 +278,9 @@ void FS_ActiveMode_DeInit(void)
 		// Disable ADC
 		if (HAL_ADC_DeInit(&hadc1) != HAL_OK)
 		{
-			Error_Handler();
+			FS_Log_WriteEvent("ADC de-initialization failed");
 		}
 	}
-
-	FS_ActivelookControl_DeInit();
 
 	if (FS_Config_Get()->enable_audio)
 	{
@@ -240,14 +293,19 @@ void FS_ActiveMode_DeInit(void)
 
 	if (FS_Config_Get()->enable_logging)
 	{
+		// Log timer usage adjusted for:
+		//   - FS_Log_DeInit (1)
+		FS_Log_WriteEvent("----------");
+		FS_Log_WriteEvent("%lu/%lu timers used after active mode de-initialization",
+				HW_TS_CountUsed() - 1, CFG_HW_TS_MAX_NBR_CONCURRENT_TIMER);
+
 		// Disable logging
 		FS_Log_DeInit(FS_State_Get()->temp_folder);
 	}
 
+	/* Stop microsecond sensor timer */
+	FS_SensorTime_Stop();
+
 	/* De-initialize FatFS */
 	FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
-
-	/* Disable charging */
-	HAL_GPIO_WritePin(CHG_EN_LO_GPIO_Port, CHG_EN_LO_Pin, GPIO_PIN_SET);
-	HAL_GPIO_WritePin(CHG_EN_HI_GPIO_Port, CHG_EN_HI_Pin, GPIO_PIN_SET);
 }

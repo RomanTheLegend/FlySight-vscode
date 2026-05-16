@@ -48,7 +48,7 @@ typedef PACKED_STRUCT
 /* Private defines -----------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define GPIO_NBR_OF_RF_SIGNALS                  9
-#define GPIO_CFG_NBR_OF_FEATURES                34
+#define GPIO_CFG_NBR_OF_FEATURES                38
 #define NBR_OF_TRACES_CONFIG_PARAMETERS         4
 #define NBR_OF_GENERAL_CONFIG_PARAMETERS        4
 
@@ -133,8 +133,16 @@ static const APPD_GpioConfig_t aGpioConfigList[GPIO_CFG_NBR_OF_FEATURES] =
 /* From v1.4.0 */
     { GPIOA, LL_GPIO_PIN_0, 0, 0},  /* NVMA_START - Set on Entry / Reset on Exit */
     { GPIOA, LL_GPIO_PIN_0, 0, 0},  /* FLASH_EOP - Set on Entry / Reset on Exit */
+/* From v1.5.0 */
     { GPIOA, LL_GPIO_PIN_0, 0, 0},  /* FLASH_WRITE - Set on Entry / Reset on Exit */
     { GPIOA, LL_GPIO_PIN_0, 0, 0},  /* FLASH_ERASE - Set on Entry / Reset on Exit */
+/* From v1.6.0 */
+    { GPIOA, LL_GPIO_PIN_0, 0, 0},  /* BLE_RESCHEDULE_EVENT - Set on Entry / Reset on Exit */
+/* From v1.8.0 */
+    { GPIOA, LL_GPIO_PIN_0, 0, 0},  /* IPCC_BLE_LLD_CMD_RX - Set on Entry / Reset on Exit */
+    { GPIOA, LL_GPIO_PIN_0, 0, 0},  /* IPCC_BLE_LLD_ACK_TX - Set on Entry / Reset on Exit */
+/* From v1.9.0 */
+    { GPIOA, LL_GPIO_PIN_0, 0, 0},  /* BLE_ASYNCH_EVENT_NACKED - Set on Entry / Reset on Exit */
 };
 
 /**
@@ -194,7 +202,7 @@ void APPD_Init( void )
   gpio_config.Pin = GPIO_PIN_14 | GPIO_PIN_13;
   enabled = __HAL_RCC_GPIOA_IS_CLK_ENABLED();
   __HAL_RCC_GPIOA_CLK_ENABLE();
-//  HAL_GPIO_Init(GPIOA, &gpio_config);
+  HAL_GPIO_Init(GPIOA, &gpio_config);
   if (!enabled) __HAL_RCC_GPIOA_CLK_DISABLE();
 
   gpio_config.Pin = GPIO_PIN_3;

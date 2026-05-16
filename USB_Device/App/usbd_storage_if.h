@@ -109,6 +109,8 @@ extern USBD_StorageTypeDef USBD_Storage_Interface_fops_FS;
   */
 
 /* USER CODE BEGIN EXPORTED_FUNCTIONS */
+int8_t USBD_SyncStorage(void);
+int8_t USBD_DeInitStorage(void);
 void USBD_SetActivityCallbacks(void (*begin)(void), void (*end)(void));
 /* USER CODE END EXPORTED_FUNCTIONS */
 

@@ -25,16 +25,16 @@
 #include "app_common.h"
 #include "config.h"
 #include "gnss.h"
+#include "log.h"
+#include "sensor_time.h"
 #include "state.h"
 #include "stm32_seq.h"
 
-#define GNSS_RATE           230400	// Baud rate
+#define GNSS_RATE           921600	// Baud rate
 #define GNSS_TIMEOUT        100		// ACK/NAK timeout (ms)
 
-#define GNSS_UPDATE_MSEC    10
+#define GNSS_UPDATE_MSEC    40
 #define GNSS_UPDATE_RATE    (GNSS_UPDATE_MSEC*1000/CFG_TS_TICK_VAL)
-
-#define GNSS_SAVED_LEN      8		// Buffer for stored GNSS messages
 
 #define UBX_NUM_CHANNELS	72		// For MAX-M8
 #define UBX_PAYLOAD_LEN		(8+12*UBX_NUM_CHANNELS) // Payload for single UBX message
@@ -72,11 +72,13 @@
 #define UBX_CFG_VALSET      0x8a
 
 #define UBX_MON             0x0a
+#define UBX_MON_TXBUF       0x08
 #define UBX_MON_HW          0x09
 #define UBX_MON_SPAN        0x31
 
 #define UBX_TIM             0x0d
 #define UBX_TIM_TP          0x01
+#define UBX_TIM_TM2         0x03
 
 #define UBX_NMEA            0xf0
 #define UBX_NMEA_GPGGA      0x00
@@ -89,11 +91,9 @@
 #define UBX_SEC             0x27
 #define UBX_SEC_ECSIGN      0x04
 
-#define UBX_MSG_POSLLH      0x01
-#define UBX_MSG_PVT         0x02
-#define UBX_MSG_VELNED      0x04
-#define UBX_MSG_TIMEUTC     0x08
-#define UBX_MSG_ALL         (UBX_MSG_POSLLH | UBX_MSG_PVT | UBX_MSG_VELNED | UBX_MSG_TIMEUTC)
+#define UBX_MSG_PVT         0x01
+#define UBX_MSG_VELNED      0x02
+#define UBX_MSG_ALL         (UBX_MSG_PVT | UBX_MSG_VELNED)
 
 #define UBX_CFG_SEC_ECCFGSESSIONID0 0x06, 0x00, 0xf6, 0x50
 #define UBX_CFG_SEC_ECCFGSESSIONID1 0x07, 0x00, 0xf6, 0x50
@@ -321,6 +321,33 @@ ubxTimTp_t;             // 16 bytes total
 
 typedef struct
 {
+	uint8_t  ch;        // Channel
+	uint8_t  flags;     // Bitmask
+	uint16_t count;     // Rising edge counter
+	uint16_t wnR;       // Week number of last rising edge
+	uint16_t wnF;       // Week number of last falling edge
+	uint32_t towMsR;    // TOW of rising edge            (ms)
+	uint32_t towSubMsR; // Submillisecond part of towMsR (ns)
+	uint32_t towMsF;    // TOW of falling edge           (ms)
+	uint32_t towSubMsF; // Submillisecond part of towMsR (ns)
+	uint32_t accEst;    // Accuracy estimate             (ns)
+}
+ubxTimTm2_t;            // 28 bytes total
+
+typedef struct
+{
+	uint16_t pending[6];   // Bytes pending in transmit buffer
+	uint8_t  usage[6];     // Maximum usage in last period each target (%)
+	uint8_t  peakUsage[6]; // Maximum usage each target (%)
+	uint8_t  tUsage;       // Maximum usage last period all targets (%)
+	uint8_t  tPeakUsage;   // Maximum usage all targets (%)
+	uint8_t  errors;       // Error bitmask
+	uint8_t  reserved;     // Reserved
+}
+ubxMonTxbuf_t;             // 28 bytes total
+
+typedef struct
+{
 	uint8_t clsID;     // Class ID of acknowledged message
 	uint8_t msgID;     // Message ID of acknowledged message
 }
@@ -357,6 +384,7 @@ static union
 	ubxNavTimeUtc_t navTimeUtc;
 	ubxNavSat_t     navSat;
 	ubxTimTp_t      timTp;
+	ubxTimTm2_t     timTm2;
 } gnssPayload;
 
 // Saved GNSS messages
@@ -366,6 +394,7 @@ static bool validTime;
 
 static FS_GNSS_Data_t gnssData;
 static FS_GNSS_Time_t gnssTime;
+static FS_GNSS_Int_t  gnssInt;
 
 static uint8_t timer_id;
 
@@ -382,6 +411,16 @@ static enum
 	st_ck_b
 } gnssState;
 
+static uint32_t updateCount;
+static uint32_t updateTotalTime;
+static uint32_t updateMaxTime;
+static uint32_t updateLastCall;
+static uint32_t updateMaxInterval;
+static uint32_t bufferUsed;
+
+// Error logging
+static volatile bool gnss_is_initializing = 0;
+static volatile uint32_t uart_error_code;
 
 // UART handle
 extern UART_HandleTypeDef huart1;
@@ -389,10 +428,43 @@ extern UART_HandleTypeDef huart1;
 static void FS_GNSS_Timer(void);
 static void FS_GNSS_Update(void);
 
+static void (*data_ready_callback)(void) = NULL;
+static void (*time_ready_callback)(bool validTime) = NULL;
+static void (*raw_ready_callback)(void) = NULL;
+static void (*int_ready_callback)(void) = NULL;
+
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-	if (huart->ErrorCode & HAL_UART_ERROR_ORE)
+	uart_error_code = huart->ErrorCode;
+
+	// During initialization, a framing error is expected due to the baud rate switch.
+	// We should ignore it and continue.
+	if (gnss_is_initializing && (uart_error_code & HAL_UART_ERROR_FE))
 	{
+		return;
+	}
+
+	// Check for common, recoverable data errors (Overrun, Noise, Framing)
+	if (uart_error_code & (HAL_UART_ERROR_ORE | HAL_UART_ERROR_NE | HAL_UART_ERROR_FE))
+	{
+		// These are non-fatal. We will try to recover.
+		// Immediately restart the DMA transfer to continue receiving data.
+		if (HAL_UART_Receive_DMA(&huart1, gnssRxData.whole, GNSS_RX_BUF_LEN) == HAL_OK)
+		{
+			// If restart was successful, log the error message.
+			FS_Log_WriteEventAsync("GNSS UART non-fatal error: 0x%lX", uart_error_code);
+		}
+		else
+		{
+			// The recovery mechanism itself has failed. This is a critical, unrecoverable fault.
+			// The UART is now in an unknown state and cannot receive data.
+			Error_Handler();
+		}
+	}
+	else
+	{
+		// Any other error (especially HAL_UART_ERROR_DMA) is considered critical and unrecoverable.
+		// Halt the system. The error code can be inspected in a debug session.
 		Error_Handler();
 	}
 }
@@ -578,54 +650,46 @@ static void FS_GNSS_ReceiveMessage(uint8_t msgReceived, uint32_t timeOfWeek)
 	if (gnssMsgReceived == UBX_MSG_ALL)
 	{
 		gnssData.iTOW = timeOfWeek;
-		FS_GNSS_DataReady_Callback();
+		if (data_ready_callback)
+		{
+			data_ready_callback();
+		}
 		gnssMsgReceived = 0;
 	}
 }
 
 static void FS_GNSS_HandlePvt(void)
 {
+	gnssData.year = gnssPayload.navPvt.year;
+	gnssData.month = gnssPayload.navPvt.month;
+	gnssData.day = gnssPayload.navPvt.day;
+	gnssData.hour = gnssPayload.navPvt.hour;
+	gnssData.min = gnssPayload.navPvt.min;
+	gnssData.sec = gnssPayload.navPvt.sec;
+	gnssData.tAcc = gnssPayload.navPvt.tAcc;
+	gnssData.nano = gnssPayload.navPvt.nano;
 	gnssData.gpsFix = gnssPayload.navPvt.gpsFix;
 	gnssData.numSV = gnssPayload.navPvt.numSV;
+	gnssData.lon = gnssPayload.navPvt.lon;
+	gnssData.lat = gnssPayload.navPvt.lat;
+	gnssData.hMSL = gnssPayload.navPvt.hMSL;
+	gnssData.hAcc = gnssPayload.navPvt.hAcc;
+	gnssData.vAcc = gnssPayload.navPvt.vAcc;
+	gnssData.velN = gnssPayload.navPvt.velN;
+	gnssData.velE = gnssPayload.navPvt.velE;
+	gnssData.velD = gnssPayload.navPvt.velD;
+	gnssData.sAcc = gnssPayload.navPvt.sAcc;
 
 	FS_GNSS_ReceiveMessage(UBX_MSG_PVT, gnssPayload.navPvt.iTOW);
 }
 
-static void FS_GNSS_HandlePosition(void)
-{
-	gnssData.lon = gnssPayload.navPosLlh.lon;
-	gnssData.lat = gnssPayload.navPosLlh.lat;
-	gnssData.hMSL = gnssPayload.navPosLlh.hMSL;
-	gnssData.hAcc = gnssPayload.navPosLlh.hAcc;
-	gnssData.vAcc = gnssPayload.navPosLlh.vAcc;
-
-	FS_GNSS_ReceiveMessage(UBX_MSG_POSLLH, gnssPayload.navPosLlh.iTOW);
-}
-
 static void FS_GNSS_HandleVelocity(void)
 {
-	gnssData.velN = gnssPayload.navVelNed.velN;
-	gnssData.velE = gnssPayload.navVelNed.velE;
-	gnssData.velD = gnssPayload.navVelNed.velD;
 	gnssData.speed = gnssPayload.navVelNed.speed;
 	gnssData.gSpeed = gnssPayload.navVelNed.gSpeed;
-	gnssData.sAcc = gnssPayload.navVelNed.sAcc;
+	gnssData.heading = gnssPayload.navVelNed.heading;
 
 	FS_GNSS_ReceiveMessage(UBX_MSG_VELNED, gnssPayload.navVelNed.iTOW);
-}
-
-static void FS_GNSS_HandleTimeUTC(void)
-{
-	gnssData.tAcc = gnssPayload.navTimeUtc.tAcc;
-	gnssData.nano = gnssPayload.navTimeUtc.nano;
-	gnssData.year = gnssPayload.navTimeUtc.year;
-	gnssData.month = gnssPayload.navTimeUtc.month;
-	gnssData.day = gnssPayload.navTimeUtc.day;
-	gnssData.hour = gnssPayload.navTimeUtc.hour;
-	gnssData.min = gnssPayload.navTimeUtc.min;
-	gnssData.sec = gnssPayload.navTimeUtc.sec;
-
-	FS_GNSS_ReceiveMessage(UBX_MSG_TIMEUTC, gnssPayload.navTimeUtc.iTOW);
 }
 
 static void FS_GNSS_HandleTp(void)
@@ -633,6 +697,17 @@ static void FS_GNSS_HandleTp(void)
 	gnssTime.towMS = gnssPayload.timTp.towMS;
 	gnssTime.week = gnssPayload.timTp.week;
 	validTime = true;
+}
+
+static void FS_GNSS_HandleTm2(void)
+{
+	gnssInt.towMS = gnssPayload.timTm2.towMsR;
+	gnssInt.week = gnssPayload.timTm2.wnR;
+
+	if (int_ready_callback)
+	{
+		int_ready_callback();
+	}
 }
 
 static void FS_GNSS_HandleMessage(void)
@@ -645,14 +720,8 @@ static void FS_GNSS_HandleMessage(void)
 		case UBX_NAV_PVT:
 			FS_GNSS_HandlePvt();
 			break;
-		case UBX_NAV_POSLLH:
-			FS_GNSS_HandlePosition();
-			break;
 		case UBX_NAV_VELNED:
 			FS_GNSS_HandleVelocity();
-			break;
-		case UBX_NAV_TIMEUTC:
-			FS_GNSS_HandleTimeUTC();
 			break;
 		}
 		break;
@@ -661,6 +730,9 @@ static void FS_GNSS_HandleMessage(void)
 		{
 		case UBX_TIM_TP:
 			FS_GNSS_HandleTp();
+			break;
+		case UBX_TIM_TM2:
+			FS_GNSS_HandleTm2();
 			break;
 		}
 		break;
@@ -680,20 +752,18 @@ static void FS_GNSS_InitMessages(void)
 		{UBX_NMEA, UBX_NMEA_GPGSV,  0},
 		{UBX_NMEA, UBX_NMEA_GPRMC,  0},
 		{UBX_NMEA, UBX_NMEA_GPVTG,  0},
-		{UBX_NAV,  UBX_NAV_POSLLH,  1},
 		{UBX_NAV,  UBX_NAV_VELNED,  1},
 		{UBX_NAV,  UBX_NAV_PVT,     1},
-		{UBX_NAV,  UBX_NAV_TIMEUTC, 1},
-		{UBX_TIM,  UBX_TIM_TP ,     MIN(1, 1000 / config->rate)},
-		{UBX_SEC,  UBX_SEC_ECSIGN,  MIN(1, 10000 / config->rate)}
+		{UBX_TIM,  UBX_TIM_TP,      1},
+		{UBX_TIM,  UBX_TIM_TM2,     1},
+		{UBX_SEC,  UBX_SEC_ECSIGN,  10}
 	};
 
 	const ubxCfgMsg_t cfgMsgRaw[] =
 	{
-		{UBX_MON,  UBX_MON_HW,      1000 / config->rate},
-		{UBX_MON,  UBX_MON_SPAN,    1000 / config->rate},
-		{UBX_NAV,  UBX_NAV_SAT,     1000 / config->rate},
-		{UBX_NAV,  UBX_NAV_STATUS,  1000 / config->rate}
+		{UBX_MON,  UBX_MON_TXBUF,   1},
+		{UBX_MON,  UBX_MON_SPAN,    1},
+		{UBX_NAV,  UBX_NAV_SAT,     MAX(1, 1000 / config->rate)}
 	};
 
 	size_t i, n;
@@ -701,8 +771,8 @@ static void FS_GNSS_InitMessages(void)
 	const ubxCfgRate_t cfgRate =
 	{
 		.measRate   = config->rate, // Measurement rate (ms)
-		.navRate    = 1,        // Navigation rate (cycles)
-		.timeRef    = 0         // UTC time
+		.navRate    = 1,            // Navigation rate (cycles)
+		.timeRef    = 0             // UTC time
 	};
 
 	const ubxCfgNav5_t cfgNav5 =
@@ -796,6 +866,16 @@ void FS_GNSS_Init(void)
 	gnssMsgReceived = 0;
 	validTime = false;
 
+	updateCount = 0;
+	updateTotalTime = 0;
+	updateMaxTime = 0;
+	updateLastCall = 0;
+	updateMaxInterval = 0;
+	bufferUsed = 0;
+
+	// Set initialization flag
+	gnss_is_initializing = true;
+
 	do
 	{
 		while (huart1.gState == HAL_UART_STATE_BUSY_TX);
@@ -842,7 +922,10 @@ void FS_GNSS_Init(void)
 	// Configure UBX messages
 	FS_GNSS_InitMessages();
 
-	// Initialize GNSS task
+	// Clear initialization flag
+	gnss_is_initializing = false;
+
+	// Initialize GNSS tasks
 	UTIL_SEQ_RegTask(1<<CFG_TASK_FS_GNSS_UPDATE_ID, UTIL_SEQ_RFU, FS_GNSS_Update);
 
 	// Initialize GNSS update timer
@@ -857,6 +940,14 @@ void FS_GNSS_DeInit(void)
 
 	// Delete GNSS update timer
 	HW_TS_Delete(timer_id);
+
+	// Add event log entries for timing info
+	FS_Log_WriteEvent("----------");
+	FS_Log_WriteEvent("%lu/%lu slots used in GNSS buffer", bufferUsed, GNSS_RX_BUF_LEN);
+	FS_Log_WriteEvent("%lu ms average time spent in GNSS update task",
+			(updateCount > 0) ? (updateTotalTime / updateCount) : 0);
+	FS_Log_WriteEvent("%lu ms maximum time spent in GNSS update task", updateMaxTime);
+	FS_Log_WriteEvent("%lu ms maximum time between calls to GNSS update task", updateMaxInterval);
 }
 
 void FS_GNSS_Start(void)
@@ -903,7 +994,19 @@ static void FS_GNSS_Timer(void)
 
 static void FS_GNSS_Update(void)
 {
+	uint32_t msStart, msEnd;
 	uint32_t writeIndex = GNSS_RX_BUF_LEN - huart1.hdmarx->Instance->CNDTR;
+
+	msStart = HAL_GetTick();
+
+	if (updateLastCall != 0)
+	{
+		updateMaxInterval = MAX(updateMaxInterval, msStart - updateLastCall);
+	}
+	updateLastCall = msStart;
+
+	// Update buffer statistics
+	bufferUsed = MAX(bufferUsed, (writeIndex - gnssRxIndex) % GNSS_RX_BUF_LEN);
 
 	while (gnssRxIndex != writeIndex)
 	{
@@ -913,12 +1016,23 @@ static void FS_GNSS_Update(void)
 		}
 	}
 
-	if (FS_Config_Get()->enable_raw &&
-			(writeIndex / GNSS_RAW_BUF_LEN != gnssRawIndex))
+	if (FS_Config_Get()->enable_raw)
 	{
-		FS_GNSS_RawReady_Callback();
-		gnssRawIndex = writeIndex / GNSS_RAW_BUF_LEN;
+		while (writeIndex / GNSS_RAW_BUF_LEN != gnssRawIndex)
+		{
+			if (raw_ready_callback)
+			{
+				raw_ready_callback();
+			}
+			gnssRawIndex = (gnssRawIndex + 1) % (GNSS_RX_BUF_LEN / GNSS_RAW_BUF_LEN);
+		}
 	}
+
+	++updateCount;
+
+	msEnd = HAL_GetTick();
+	updateTotalTime += msEnd - msStart;
+	updateMaxTime = MAX(updateMaxTime, msEnd - msStart);
 }
 
 const FS_GNSS_Data_t *FS_GNSS_GetData(void)
@@ -926,18 +1040,14 @@ const FS_GNSS_Data_t *FS_GNSS_GetData(void)
 	return &gnssData;
 }
 
-__weak void FS_GNSS_DataReady_Callback(void)
-{
-  /* NOTE: This function should not be modified, when the callback is needed,
-           the FS_GNSS_DataReady_Callback could be implemented in the user file
-   */
-}
-
 void FS_GNSS_Timepulse(void)
 {
-	gnssTime.time = HAL_GetTick();
+	gnssTime.time = FS_SensorTime_GetTicks();
 
-	FS_GNSS_TimeReady_Callback(validTime);
+	if (time_ready_callback)
+	{
+		time_ready_callback(validTime);
+	}
 
 	validTime = false;
 }
@@ -947,21 +1057,32 @@ const FS_GNSS_Time_t *FS_GNSS_GetTime(void)
 	return &gnssTime;
 }
 
-__weak void FS_GNSS_TimeReady_Callback(bool validTime)
-{
-  /* NOTE: This function should not be modified, when the callback is needed,
-           the FS_GNSS_TimeReady_Callback could be implemented in the user file
-   */
-}
-
 const FS_GNSS_Raw_t *FS_GNSS_GetRaw(void)
 {
 	return &gnssRxData.split[gnssRawIndex];
 }
 
-__weak void FS_GNSS_RawReady_Callback(void)
+const FS_GNSS_Int_t *FS_GNSS_GetInt(void)
 {
-  /* NOTE: This function should not be modified, when the callback is needed,
-           the FS_GNSS_RawReady_Callback could be implemented in the user file
-   */
+	return &gnssInt;
+}
+
+void FS_GNSS_DataReady_SetCallback(void (*callback)(void))
+{
+	data_ready_callback = callback;
+}
+
+void FS_GNSS_TimeReady_SetCallback(void (*callback)(bool))
+{
+	time_ready_callback = callback;
+}
+
+void FS_GNSS_RawReady_SetCallback(void (*callback)(void))
+{
+	raw_ready_callback = callback;
+}
+
+void FS_GNSS_IntReady_SetCallback(void (*callback)(void))
+{
+	int_ready_callback = callback;
 }

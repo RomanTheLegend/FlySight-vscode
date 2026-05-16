@@ -30,6 +30,7 @@
 #include "audio_control.h"
 #include "common.h"
 #include "config.h"
+#include "nav.h"
 #include "stm32_seq.h"
 
 #define CONSUMER_TIMER_MSEC    10
@@ -195,7 +196,11 @@ static void getValues(
 	int32_t *min,
 	int32_t *max)
 {
+	const int32_t velD = current->velD / 10;
+
 	uint16_t speed_mul = 1024;
+
+	int32_t tVal;
 
 	if (config->use_sas)
 	{
@@ -218,35 +223,143 @@ static void getValues(
 		}
 	}
 
+	// If navigation is disabled and the requested mode is a
+	// navigation-related feature, mark it as invalid
+	if (!config->enable_nav &&
+	    (mode == FS_CONFIG_MODE_DIRECTION_TO_DESTINATION ||
+	     mode == FS_CONFIG_MODE_DISTANCE_TO_DESTINATION ||
+	     mode == FS_CONFIG_MODE_DIRECTION_TO_BEARING ||
+	     mode == FS_CONFIG_MODE_LEFT_RIGHT))
+	{
+		*val = INVALID_VALUE;
+		return;
+	}
+
 	switch (mode)
 	{
-	case 0: // Horizontal speed
+	case FS_CONFIG_MODE_HORIZONTAL_SPEED:
 		*val = (current->gSpeed * 1024) / speed_mul;
 		break;
-	case 1: // Vertical speed
-		*val = (current->velD * 1024) / speed_mul;
+	case FS_CONFIG_MODE_VERTICAL_SPEED:
+		*val = (velD * 1024) / speed_mul;
 		break;
-	case 2: // Glide ratio
-		if (current->velD != 0)
+	case FS_CONFIG_MODE_GLIDE_RATIO:
+		if (velD != 0)
 		{
-			*val = 10000 * (int32_t) current->gSpeed / current->velD;
+			*val = 10000 * (int32_t) current->gSpeed / velD;
 			*min *= 100;
 			*max *= 100;
 		}
 		break;
-	case 3: // Inverse glide ratio
+	case FS_CONFIG_MODE_INVERSE_GLIDE_RATIO:
 		if (current->gSpeed != 0)
 		{
-			*val = 10000 * current->velD / (int32_t) current->gSpeed;
+			*val = 10000 * velD / (int32_t) current->gSpeed;
 			*min *= 100;
 			*max *= 100;
 		}
 		break;
-	case 4: // Total speed
+	case FS_CONFIG_MODE_TOTAL_SPEED:
 		*val = (current->speed * 1024) / speed_mul;
 		break;
-	case 11: // Dive angle
-		*val = atan2(current->velD, current->gSpeed) / M_PI * 180;
+	case FS_CONFIG_MODE_DIRECTION_TO_DESTINATION:
+		//check if too far from destination for Nav, would indicate user error with Lat & Lon
+		if ((calcDistance(current->lat,current->lon,config->lat,config->lon) < config->max_dist) || (config->max_dist == 0))
+		{
+			//check if above height tone should be silenced
+			if ((current->hMSL > (config->end_nav+config->dz_elev)) || (config->end_nav == 0))
+			{
+				tVal=calcDirection(current->lat,current->lon,config->lat,config->lon,current->heading);
+				//check if heading not within UBX_min_angle deg of bearing or tones needed for other measurement
+				if ((ABS(tVal) > config->min_angle) || (config->mode_2 != FS_CONFIG_MODE_DIRECTION_TO_DESTINATION) || (config->min_angle==0))
+				{
+					*min = -180;
+					*max = 180;
+					//manipulate tone so biggest change is at desired heading
+					if(tVal < 0)
+					{
+						*val = -180-tVal;
+					}
+					else
+					{
+						*val = 180-tVal;
+					}
+				}
+			}
+		}
+		break;
+	case FS_CONFIG_MODE_DISTANCE_TO_DESTINATION:
+		*min = 0;
+		if(config->max_dist != 0 )
+		{
+			*max = config->max_dist;
+		}
+		else
+		{
+			*max = 10000; //set a default maximum value
+		}
+		*val = calcDistance(current->lat,current->lon,config->lat,config->lon);
+		if(*val < *max)
+		{
+			*val = *max-*val;  //make inverse so higher pitch indicates shorter distance
+		}
+		else
+		{
+			*val = 0;  //set to lowest pitch/Hz
+		}
+		break;
+	case FS_CONFIG_MODE_DIRECTION_TO_BEARING: // Direction to bearing
+		//check if above height tone should be silenced
+		if ((current->hMSL > (config->end_nav+config->dz_elev)) || (config->end_nav == 0))
+		{
+			tVal=calcRelBearing(config->bearing,current->heading/100000);
+			//check if heading not within UBX_min_angle deg of bearing or tones needed for other measurement
+			if ((ABS(tVal) > config->min_angle) || (config->mode_2 != FS_CONFIG_MODE_DIRECTION_TO_BEARING) || (config->min_angle==0))
+			{
+				*min = -180;
+				*max = 180;
+				//manipulate tone so biggest change is at desired heading
+				if(tVal < 0)
+				{
+					*val = -180-tVal;
+				}
+				else
+				{
+					*val = 180-tVal;
+				}
+			}
+		}
+		break;
+	case FS_CONFIG_MODE_LEFT_RIGHT:
+		//check if too far from destination for Nav, would indicate user error with Lat & Lon
+		if ((calcDistance(current->lat,current->lon,config->lat,config->lon) < config->max_dist) || (config->max_dist == 0))
+		{
+			//check if above height tone should be silenced
+			if ((current->hMSL > (config->end_nav+config->dz_elev)) || (config->end_nav == 0))
+			{
+				tVal=calcDirection(current->lat,current->lon,config->lat,config->lon,current->heading);
+				*min = 0;
+				*max = 10;
+				if(ABS(tVal) > config->min_angle)
+				{
+					if(tVal < 0)   //left turn required  - low pitch tone
+					{
+						*val = *min;
+					}
+					else           //right turn required - high pitch tone
+					{
+						*val = *max;
+					}
+				}
+				else              //mid tone
+				{
+					*val = (*max-*min)/2;
+				}
+			}
+		}
+		break;
+	case FS_CONFIG_MODE_DIVE_ANGLE:
+		*val = atan2(velD, current->gSpeed) / M_PI * 180;
 		break;
 	}
 }
@@ -311,10 +424,14 @@ static void speakValue(
 	FS_Config_Data_t *config,
 	FS_GNSS_Data_t *current)
 {
+	const int32_t velD = current->velD / 10;
+
 	uint16_t speed_mul = 1024;
 	int32_t step_size, step;
 
 	char *end_ptr;
+
+	int32_t tVal;
 
 	if (config->use_sas)
 	{
@@ -337,6 +454,17 @@ static void speakValue(
 		}
 	}
 
+	// If navigation is disabled and the requested mode is a
+	// navigation-related feature, mark it as invalid
+	if (!config->enable_nav &&
+	   (config->speech[cur_speech].mode == FS_CONFIG_MODE_DIRECTION_TO_DESTINATION ||
+	    config->speech[cur_speech].mode == FS_CONFIG_MODE_DISTANCE_TO_DESTINATION ||
+	    config->speech[cur_speech].mode == FS_CONFIG_MODE_DIRECTION_TO_BEARING ||
+	    config->speech[cur_speech].mode == FS_CONFIG_MODE_LEFT_RIGHT))
+	{
+		return;
+	}
+
 	switch (config->speech[cur_speech].units)
 	{
 	case FS_CONFIG_UNITS_KMH:
@@ -344,6 +472,9 @@ static void speakValue(
 		break;
 	case FS_CONFIG_UNITS_MPH:
 		speed_mul = (uint16_t) (((uint32_t) speed_mul * 29297) / 65536);
+		break;
+	case FS_CONFIG_UNITS_KNOTS:
+		speed_mul = (uint16_t) (((uint32_t) speed_mul * 33713) / 65536);
 		break;
 	}
 
@@ -356,40 +487,80 @@ static void speakValue(
 
 	switch (config->speech[cur_speech].mode)
 	{
-	case 0: // Horizontal speed
+	case FS_CONFIG_MODE_HORIZONTAL_SPEED:
 		speech_ptr = writeInt32ToBuf(speech_ptr, (current->gSpeed * 1024) / speed_mul, 2, 1, 0);
 		break;
-	case 1: // Vertical speed
-		speech_ptr = writeInt32ToBuf(speech_ptr, (current->velD * 1024) / speed_mul, 2, 1, 0);
+	case FS_CONFIG_MODE_VERTICAL_SPEED:
+		speech_ptr = writeInt32ToBuf(speech_ptr, (velD * 1024) / speed_mul, 2, 1, 0);
 		break;
-	case 2: // Glide ratio
-		if (current->velD != 0)
+	case FS_CONFIG_MODE_GLIDE_RATIO:
+		if (velD != 0)
 		{
-			speech_ptr = writeInt32ToBuf(speech_ptr, 100 * (int32_t) current->gSpeed / current->velD, 2, 1, 0);
+			speech_ptr = writeInt32ToBuf(speech_ptr, 100 * (int32_t) current->gSpeed / velD, 2, 1, 0);
 		}
 		else
 		{
 			*(--speech_ptr) = '\0';
 		}
 		break;
-	case 3: // Inverse glide ratio
+	case FS_CONFIG_MODE_INVERSE_GLIDE_RATIO:
 		if (current->gSpeed != 0)
 		{
-			speech_ptr = writeInt32ToBuf(speech_ptr, 100 * (int32_t) current->velD / current->gSpeed, 2, 1, 0);
+			speech_ptr = writeInt32ToBuf(speech_ptr, 100 * (int32_t) velD / current->gSpeed, 2, 1, 0);
 		}
 		else
 		{
 			*(--speech_ptr) = '\0';
 		}
 		break;
-	case 4: // Total speed
+	case FS_CONFIG_MODE_TOTAL_SPEED:
 		speech_ptr = writeInt32ToBuf(speech_ptr, (current->speed * 1024) / speed_mul, 2, 1, 0);
 		break;
-	case 11: // Dive angle
-		speech_ptr = writeInt32ToBuf(speech_ptr, 100 * atan2(current->velD, current->gSpeed) / M_PI * 180, 2, 1, 0);
+	case FS_CONFIG_MODE_DIRECTION_TO_DESTINATION:
+		//check if too far from destination for Nav, would indicate user error with Lat & Lon
+		if ((calcDistance(current->lat,current->lon,config->lat,config->lon) < config->max_dist) || (config->max_dist == 0))
+		{
+			//check if above height tone should be silenced
+			if ((current->hMSL > (config->end_nav+config->dz_elev)) || (config->end_nav == 0))
+			{
+				config->speech[cur_speech].decimals = 0;
+				tVal = calcDirection(current->lat,current->lon,config->lat,config->lon,current->heading);
+				speech_ptr = writeInt32ToBuf(speech_ptr, ABS(tVal)*100, 2, 1, 0);
+			}
+		}
 		break;
-	case 12: // Altitude
-		if (config->speech[cur_speech].units == FS_CONFIG_UNITS_KMH)
+	case FS_CONFIG_MODE_DISTANCE_TO_DESTINATION:
+		config->speech[cur_speech].decimals = 1;
+		tVal = calcDistance(current->lat,current->lon,config->lat,config->lon);  // returns metres
+		switch (config->speech[cur_speech].units)
+		{
+		case FS_CONFIG_UNITS_METERS:
+			tVal = tVal / 10;
+			break;
+		case FS_CONFIG_UNITS_FEET:
+			tVal = (tVal * 100) / 1609;
+			break;
+		case FS_CONFIG_UNITS_NM:
+			tVal = (tVal * 100) / 1852;
+			break;
+		}
+		tVal = tVal + 5; //for correct rounding when reducing to one decimal place
+		speech_ptr = writeInt32ToBuf(speech_ptr, tVal, 2, 1, 0);
+		break;
+	case FS_CONFIG_MODE_DIRECTION_TO_BEARING:
+		//check if above height tone should be silenced
+		if ((current->hMSL > (config->end_nav+config->dz_elev)) || (config->end_nav == 0))
+		{
+			config->speech[cur_speech].decimals = 0;
+			tVal = calcRelBearing(config->bearing,current->heading/100000);
+			speech_ptr = writeInt32ToBuf(speech_ptr, ABS(tVal)*100, 2, 1, 0);
+		}
+		break;
+	case FS_CONFIG_MODE_DIVE_ANGLE:
+		speech_ptr = writeInt32ToBuf(speech_ptr, 100 * atan2(velD, current->gSpeed) / M_PI * 180, 2, 1, 0);
+		break;
+	case FS_CONFIG_MODE_ALTITUDE:
+		if (config->speech[cur_speech].units == FS_CONFIG_UNITS_METERS)
 		{
 			step_size = 10000 * config->speech[cur_speech].decimals;
 		}
@@ -414,7 +585,7 @@ static void speakValue(
 
 	// Step 2: Truncate to the desired number of decimal places
 
-	if (config->speech[cur_speech].mode != 5)
+	if (config->speech[cur_speech].mode != FS_CONFIG_MODE_ALTITUDE)
 	{
 		if (config->speech[cur_speech].decimals == 0) end_ptr -= 4;
 		else end_ptr -= 3 - config->speech[cur_speech].decimals;
@@ -424,15 +595,34 @@ static void speakValue(
 
 	switch (config->speech[cur_speech].mode)
 	{
-	case 0: // Horizontal speed
-	case 1: // Vertical speed
-	case 2: // Glide ratio
-	case 3: // Inverse glide ratio
-	case 4: // Total speed
-	case 11: // Dive angle
+	case FS_CONFIG_MODE_HORIZONTAL_SPEED:
+	case FS_CONFIG_MODE_VERTICAL_SPEED:
+	case FS_CONFIG_MODE_GLIDE_RATIO:
+	case FS_CONFIG_MODE_INVERSE_GLIDE_RATIO:
+	case FS_CONFIG_MODE_TOTAL_SPEED:
+	case FS_CONFIG_MODE_DIVE_ANGLE:
 		break;
-	case 12: // Altitude
-		*(end_ptr++) = (config->speech[cur_speech].units == FS_CONFIG_UNITS_KMH) ? 'm' : 'f';
+	case FS_CONFIG_MODE_DIRECTION_TO_DESTINATION:
+	case FS_CONFIG_MODE_DIRECTION_TO_BEARING:
+		if(tVal < 0)			*(end_ptr++) = 'l';
+		else if (tVal > 0)		*(end_ptr++) = 'r';
+		break;
+	case FS_CONFIG_MODE_DISTANCE_TO_DESTINATION:
+		switch (config->speech[cur_speech].units)
+		{
+		case FS_CONFIG_UNITS_METERS:
+			*(end_ptr++) = 'K';
+			break;
+		case FS_CONFIG_UNITS_FEET:
+			*(end_ptr++) = 'i';
+			break;
+		case FS_CONFIG_UNITS_NM:
+			*(end_ptr++) = 'n';
+			break;
+		}
+		break;
+	case FS_CONFIG_MODE_ALTITUDE:
+		*(end_ptr++) = (config->speech[cur_speech].units == FS_CONFIG_UNITS_METERS) ? 'm' : 'f';
 		break;
 	}
 
@@ -445,6 +635,8 @@ static void updateAlarms(
 	FS_Config_Data_t *config,
 	FS_GNSS_Data_t *current)
 {
+	const int32_t velD = current->velD / 10;
+
 	uint8_t i, suppress_tone, suppress_alt;
 	int32_t step_size, step, step_elev;
 
@@ -550,7 +742,7 @@ static void updateAlarms(
 		    !suppress_alt)
 		{
 			if ((step_elev >= min && step_elev < max) &&
-			    ABS(current->velD) >= config->threshold &&
+			    ABS(velD) >= config->threshold &&
 			    current->gSpeed >= config->hThreshold)
 			{
 				speech_ptr = speech_buf;
@@ -567,6 +759,8 @@ static void updateTones(
 	FS_Config_Data_t *config,
 	FS_GNSS_Data_t *current)
 {
+	const int32_t velD = current->velD / 10;
+
 	static int32_t x0 = INVALID_VALUE, x1, x2;
 
 	int32_t val_1 = INVALID_VALUE, min_1 = config->min, max_1 = config->max;
@@ -576,7 +770,36 @@ static void updateTones(
 
 	getValues(current, config, config->mode, &val_1, &min_1, &max_1);
 
-	if (config->mode_2 == 8)
+	if (config->mode_2 == FS_CONFIG_MODE_DIRECTION_TO_DESTINATION) // Direction to destination
+	{
+		if (config->mode == FS_CONFIG_MODE_DIRECTION_TO_DESTINATION)  //no need to re-calculate direction
+		{
+			val_2 = ABS(val_1);
+		}
+		else
+		{
+			val_2 = ABS(calcDirection(current->lat,current->lon,config->lat,config->lon,current->heading));
+			val_2 = 180-val_2;  //make inverse so faster rate indicates closer to bearing
+		}
+		val_2 = pow(val_2, 3);
+		min_2 = 0;
+		max_2 = pow(180, 3);
+	}
+	else if (config->mode_2 == FS_CONFIG_MODE_DIRECTION_TO_BEARING) // Direction to bearing
+	{
+		if (config->mode == FS_CONFIG_MODE_DIRECTION_TO_BEARING)  //no need to re-calculate direction
+		{
+			val_2 = ABS(val_1);
+		}
+		else
+		{
+			val_2 = ABS(calcRelBearing(config->bearing,current->heading));
+			val_2 = 180-val_2;  //make inverse so faster rate indicates closer to bearing
+		}
+		min_2 = 0;
+		max_2 = 180;
+	}
+	else if (config->mode_2 == FS_CONFIG_MODE_MAGNITUDE_OF_VALUE_1)
 	{
 		getValues(current, config, config->mode, &val_2, &min_2, &max_2);
 		if (val_2 != INVALID_VALUE)
@@ -584,7 +807,7 @@ static void updateTones(
 			val_2 = ABS(val_2);
 		}
 	}
-	else if (config->mode_2 == 9)
+	else if (config->mode_2 == FS_CONFIG_MODE_CHANGE_IN_VALUE_1)
 	{
 		x2 = x1;
 		x1 = x0;
@@ -606,7 +829,7 @@ static void updateTones(
 
 	if (!g_suppress_tone)
 	{
-		if (ABS(current->velD) >= config->threshold &&
+		if (ABS(velD) >= config->threshold &&
 			current->gSpeed >= config->hThreshold)
 		{
 			setTone(config, val_1, min_1, max_1, val_2, min_2, max_2);
@@ -619,7 +842,7 @@ static void updateTones(
 			{
 				for (i = 0; i < config->num_speech; ++i)
 				{
-					if ((config->speech[cur_speech].mode != 5) ||
+					if ((config->speech[cur_speech].mode != FS_CONFIG_MODE_ALTITUDE) ||
 						(current->hMSL - config->dz_elev >= ALT_MIN * 1000))
 					{
 						speakValue(config, current);
@@ -742,8 +965,8 @@ static void consumerTask(void)
 			else if (*speech_ptr == 't')
 			{
 				++speech_ptr;
-				filename[1] = *speech_ptr;
 				filename[0] = '1';
+				filename[1] = *speech_ptr;
 				filename[2] = '.';
 				filename[3] = 'w';
 				filename[4] = 'a';
@@ -785,6 +1008,15 @@ static void consumerTask(void)
 					case 4:
 						FS_Audio_Play("speed.wav", config->sp_volume * 5);
 						break;
+					case 5: // Direction to destination
+						FS_Audio_Play("directn.wav", config->sp_volume * 5);
+						break;
+					case 6: // Distance to destination
+						FS_Audio_Play("distance.wav", config->sp_volume * 5);
+						break;
+					case 7: // Direction to bearing
+						FS_Audio_Play("bearing.wav", config->sp_volume * 5);
+						break;
 					case 11:
 						FS_Audio_Play("dive.wav", config->sp_volume * 5);
 						break;
@@ -792,6 +1024,48 @@ static void consumerTask(void)
 						FS_Audio_Play("alt.wav", config->sp_volume * 5);
 						break;
 				}
+			}
+			else if (*speech_ptr == 'l')
+			{
+				FS_Audio_Play("left.wav", config->sp_volume * 5);
+			}
+			else if (*speech_ptr == 'r')
+			{
+				FS_Audio_Play("right.wav", config->sp_volume * 5);
+			}
+			else if (*speech_ptr == 'i')
+			{
+				FS_Audio_Play("miles.wav", config->sp_volume * 5);
+			}
+			else if (*speech_ptr == 'K')
+			{
+				FS_Audio_Play("km.wav", config->sp_volume * 5);
+			}
+			else if (*speech_ptr == 'n')
+			{
+				FS_Audio_Play("knots.wav", config->sp_volume * 5);
+			}
+			else if (*speech_ptr == 'o')
+			{
+				FS_Audio_Play("oclock.wav", config->sp_volume * 5);
+			}
+			else if (*speech_ptr == 'a')
+			{
+				FS_Audio_Play("10.wav", config->sp_volume * 5);
+			}
+			else if (*speech_ptr == 'b')
+			{
+				FS_Audio_Play("11.wav", config->sp_volume * 5);
+			}
+			else if (*speech_ptr == 'c')
+			{
+				FS_Audio_Play("12.wav", config->sp_volume * 5);
+			}
+			else if (*speech_ptr == '/')
+			{
+				++speech_ptr;
+				FS_Audio_Play(speech_ptr, config->sp_volume * 5);
+				speech_ptr += strlen(speech_ptr) - 1;
 			}
 			else
 			{
@@ -850,7 +1124,6 @@ void FS_AudioControl_Init(void)
 {
 	const FS_Config_Data_t *config = FS_Config_Get();
 	uint8_t i;
-	char filename[13];
 
 	// Initialize state
 	cur_speech = 0;
@@ -882,7 +1155,7 @@ void FS_AudioControl_Init(void)
 
 	for (i = 0; i < config->num_speech; ++i)
 	{
-		if (config->speech[i].mode == 5)
+		if (config->speech[i].mode == FS_CONFIG_MODE_ALTITUDE)
 		{
 			flags |= FLAG_SAY_ALTITUDE;
 		}
@@ -894,10 +1167,14 @@ void FS_AudioControl_Init(void)
 	}
 	else if (config->init_mode == 2)
 	{
-		filename[0] = '\0';
-		strncat(filename, config->init_filename, sizeof(filename) - 1);
-		strncat(filename, ".wav", sizeof(filename) - 1);
-		FS_Audio_Play(filename, config->sp_volume * 5);
+		if (strlen(config->init_filename))
+		{
+			strncpy(speech_buf, "/", sizeof(speech_buf));
+			strncat(speech_buf, config->init_filename,
+					sizeof(speech_buf) - strlen(speech_buf) - 1);
+			strncat(speech_buf, ".wav",
+					sizeof(speech_buf) - strlen(speech_buf) - 1);
+		}
 	}
 }
 

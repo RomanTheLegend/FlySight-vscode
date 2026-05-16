@@ -26,7 +26,7 @@
 
 typedef struct
 {
-	uint32_t time;			// ms
+	uint64_t time;			// us
 	int32_t wx;				// deg/s * 1000
 	int32_t wy;				// deg/s * 1000
 	int32_t wz;				// deg/s * 1000
@@ -40,7 +40,7 @@ void FS_IMU_TransferComplete(void);
 void FS_IMU_TransferError(void);
 
 void FS_IMU_Init(void);
-void FS_IMU_Start(void);
+HAL_StatusTypeDef FS_IMU_Start(void);
 void FS_IMU_Stop(void);
 void FS_IMU_Read(void);
 const FS_IMU_Data_t *FS_IMU_GetData(void);

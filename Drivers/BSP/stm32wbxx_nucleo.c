@@ -84,6 +84,7 @@ uint32_t hnucleo_SpixTimeout = NUCLEO_SPIx_TIMEOUT_MAX;        /*<! Value of Tim
 #ifdef HAL_SPI_MODULE_ENABLED
 /* SD IO functions */
 void                      SD_IO_Init(void);
+void                      SD_IO_SetDefaultSpeed(void);
 void                      SD_IO_CSState(uint8_t state);
 void                      SD_IO_WriteReadData(const uint8_t *DataIn, uint8_t *DataOut, uint16_t DataLength);
 uint8_t                   SD_IO_WriteByte(uint8_t Data);
@@ -155,7 +156,66 @@ static uint8_t SPIx_WriteRead(uint8_t Value)
 
 /********************************* LINK SD ************************************/
 /**
-  * @brief  Initialize the SD Card and put it into StandBy State (Ready for 
+  * @brief  Set SPI2 baud-rate prescaler.
+  * @param  Prescaler: SPI baud-rate prescaler bits.
+  * @retval None
+  */
+static void SD_SPI_SetPrescaler(uint32_t Prescaler)
+{
+  /* Disable SPI before changing prescaler */
+  __HAL_SPI_DISABLE(&hspi2);
+
+  MODIFY_REG(hspi2.Instance->CR1, SPI_CR1_BR, Prescaler);
+
+  /* Re-enable SPI */
+  __HAL_SPI_ENABLE(&hspi2);
+}
+
+/**
+  * @brief  Set SPI2 to slow speed for SD card initialization (250 kHz)
+  * @retval None
+  */
+static void SD_SPI_SetSlowSpeed(void)
+{
+  /* Set prescaler to 256: 64 MHz / 256 = 250 kHz */
+  SD_SPI_SetPrescaler(SPI_BAUDRATEPRESCALER_256);
+}
+
+/* Cache of CubeMX-configured SPI2 CR1.BR bits so we can restore the exact
+ * operating-mode SPI speed after SD initialization. */
+static uint32_t sd_spi2_fast_br_bits = 0;
+static uint8_t  sd_spi2_fast_br_valid = 0;
+
+/**
+  * @brief  Set SPI2 to fast speed for SD card data transfer (CubeMX configured)
+  * @retval None
+  */
+void SD_IO_SetFastSpeed(void)
+{
+  if (sd_spi2_fast_br_valid)
+  {
+    /* Restore prescaler configured by CubeMX in MX_SPI2_Init() */
+    SD_SPI_SetPrescaler(sd_spi2_fast_br_bits);
+  }
+  else
+  {
+    /* Fallback: CubeMX default used previously */
+    SD_SPI_SetPrescaler(SPI_BAUDRATEPRESCALER_2);
+  }
+}
+
+/**
+  * @brief  Set SPI2 to default-speed SD data transfer (16 MHz).
+  * @retval None
+  */
+void SD_IO_SetDefaultSpeed(void)
+{
+  /* 64 MHz / 4 = 16 MHz, below the 25 MHz SD default-speed limit. */
+  SD_SPI_SetPrescaler(SPI_BAUDRATEPRESCALER_4);
+}
+
+/**
+  * @brief  Initialize the SD Card and put it into StandBy State (Ready for
   *         data transfer).
   * @retval None
   */
@@ -164,11 +224,15 @@ void SD_IO_Init(void)
   uint8_t counter = 0;
 
   /*------------Put SD in SPI mode--------------*/
-  /* SD SPI Config */
+  /* SD SPI Config (CubeMX operating speed) */
   MX_SPI2_Init();
 
-  /* Enable SPI */
-  __HAL_SPI_ENABLE(&hspi2);
+  /* Cache CubeMX BR bits so SD_IO_SetFastSpeed() can restore the exact speed */
+  sd_spi2_fast_br_bits = READ_BIT(hspi2.Instance->CR1, SPI_CR1_BR);
+  sd_spi2_fast_br_valid = 1;
+
+  /* Switch to slow speed for initialization (250 kHz) */
+  SD_SPI_SetSlowSpeed();
 
   /* SD chip select high */
   SD_CS_HIGH();
@@ -181,8 +245,8 @@ void SD_IO_Init(void)
   /* Rise CS and MOSI for 80 clocks cycles */
   for (counter = 0; counter <= 9; counter++)
   {
-	/* Send dummy byte 0xFF */
-	SD_IO_WriteByte(SD_DUMMY_BYTE);
+    /* Send dummy byte 0xFF */
+    SD_IO_WriteByte(SD_DUMMY_BYTE);
   }
 }
 

@@ -1,7 +1,7 @@
 /***************************************************************************
 **                                                                        **
 **  FlySight 2 firmware                                                   **
-**  Copyright 2023 Bionic Avionics Inc.                                   **
+**  Copyright 2024 Bionic Avionics Inc.                                   **
 **                                                                        **
 **  This program is free software: you can redistribute it and/or modify  **
 **  it under the terms of the GNU General Public License as published by  **
@@ -21,13 +21,10 @@
 **  Website: http://flysight.ca/                                          **
 ****************************************************************************/
 
-#ifndef ACTIVELOOK_CONTROL_H_
-#define ACTIVELOOK_CONTROL_H_
+#ifndef START_MODE_H_
+#define START_MODE_H_
 
-#include "gnss.h"
+void FS_StartMode_Init(void);
+void FS_StartMode_DeInit(void);
 
-void FS_ActivelookControl_Init(void);
-void FS_ActivelookControl_DeInit(void);
-void FS_ActivelookControl_UpdateGNSS(const FS_GNSS_Data_t *current);
-
-#endif /* AUDIO_CONTROL_H_ */
+#endif /* START_MODE_H_ */

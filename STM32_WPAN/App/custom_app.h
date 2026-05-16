@@ -31,6 +31,7 @@ extern "C" {
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "gnss.h"
+#include "vbat.h"
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -51,6 +52,12 @@ typedef struct
   uint8_t data[244];
   uint8_t length;
 } Custom_CRS_Packet_t;
+
+typedef struct
+{
+  uint8_t data[20];
+  uint8_t length;
+} Custom_Start_Packet_t;
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
@@ -75,11 +82,17 @@ void Custom_APP_Notification(Custom_App_ConnHandle_Not_evt_t *pNotification);
 void Custom_APP_TxPoolAvailableNotification(void);
 uint8_t Custom_APP_IsConnected(void);
 
-Custom_CRS_Packet_t *Custom_CRS_GetNextTxPacket(void);
-void Custom_CRS_SendNextTxPacket(void);
 Custom_CRS_Packet_t *Custom_CRS_GetNextRxPacket(void);
 
 void Custom_GNSS_Update(const FS_GNSS_Data_t *current);
+
+Custom_Start_Packet_t *Custom_Start_GetNextControlPacket(void);
+void Custom_Start_Update(uint16_t year, uint8_t month, uint8_t day,
+                         uint8_t hour, uint8_t min, uint8_t sec, uint16_t ms);
+
+void Custom_Mode_Update(uint8_t newMode);
+
+void Custom_VBAT_Update(const FS_VBAT_Data_t *current);
 /* USER CODE END EF */
 
 #ifdef __cplusplus

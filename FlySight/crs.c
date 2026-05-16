@@ -21,6 +21,7 @@
 **  Website: http://flysight.ca/                                          **
 ****************************************************************************/
 
+#include <ble_tx_queue.h>
 #include "main.h"
 #include "app_common.h"
 #include "crs.h"
@@ -37,7 +38,7 @@
 
 #define FRAME_LENGTH 242
 
-#define TX_TIMEOUT_MSEC  100
+#define TX_TIMEOUT_MSEC  200
 #define TX_TIMEOUT_TICKS (TX_TIMEOUT_MSEC*1000/CFG_TS_TICK_VAL)
 
 #define RX_TIMEOUT_MSEC  10000
@@ -56,6 +57,7 @@ typedef enum
 	FS_CRS_COMMAND_FILE_ACK  = 0x12,
 	FS_CRS_COMMAND_NAK       = 0xf0,
 	FS_CRS_COMMAND_ACK       = 0xf1,
+	FS_CRS_COMMAND_PING      = 0xfe,
 	FS_CRS_COMMAND_CANCEL    = 0xff
 } FS_CRS_Command_t;
 
@@ -88,7 +90,6 @@ static FS_CRS_StateFunc_t *const state_table[FS_CRS_STATE_COUNT] =
 static FS_CRS_State_t state = FS_CRS_STATE_IDLE;
 
 static FIL file;
-static uint8_t buffer[FRAME_LENGTH + 1];
 static DIR dir;
 
 static uint32_t read_offset;
@@ -102,16 +103,21 @@ static uint32_t last_packet;
 static uint8_t ack_timer_id;
 static volatile uint8_t timeout_flag;
 
+static void FS_CRS_TxCallback()
+{
+	UTIL_SEQ_SetTask(1<<CFG_TASK_FS_CRS_UPDATE_ID, CFG_SCH_PRIO_1);
+}
+
 static void FS_CRS_SendPacket(uint8_t command, uint8_t *payload, uint8_t length)
 {
-	Custom_CRS_Packet_t *tx_packet;
+	uint8_t *tx_buffer;
 
-	if ((tx_packet = Custom_CRS_GetNextTxPacket()))
+	if ((tx_buffer = BLE_TX_Queue_GetNextTxPacket()))
 	{
-		tx_packet->length = length + 1;
-		*(tx_packet->data) = command;
-		memcpy(tx_packet->data + 1, payload, length);
-		Custom_CRS_SendNextTxPacket();
+		tx_buffer[0] = command;
+		memcpy(&tx_buffer[1], payload, length);
+		BLE_TX_Queue_SendNextTxPacket(CUSTOM_STM_FT_PACKET_OUT, length + 1,
+				&SizeFt_Packet_Out, FS_CRS_TxCallback);
 	}
 }
 
@@ -139,158 +145,199 @@ static FS_CRS_State_t FS_CRS_State_Idle(void)
 			{
 			case FS_CRS_COMMAND_CREATE:
 				// Initialize disk
-				FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS);
-
-				// Create file
-				if (f_open(&file, (TCHAR *) &(packet->data[1]),
-						FA_WRITE|FA_CREATE_NEW) == FR_OK)
+				if (FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS)
+						== FS_RESOURCE_MANAGER_SUCCESS)
 				{
-					FS_CRS_SendAck(FS_CRS_COMMAND_CREATE);
-					f_close(&file);
+					// Create file
+					if (f_open(&file, (TCHAR *) &(packet->data[1]),
+							FA_WRITE|FA_CREATE_NEW) == FR_OK)
+					{
+						FS_CRS_SendAck(FS_CRS_COMMAND_CREATE);
+						f_close(&file);
+					}
+					else
+					{
+						FS_CRS_SendNak(FS_CRS_COMMAND_CREATE);
+					}
+
+					// De-initialize disk
+					FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
 				}
 				else
 				{
 					FS_CRS_SendNak(FS_CRS_COMMAND_CREATE);
 				}
-
-				// De-initialize disk
-				FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
 				break;
 			case FS_CRS_COMMAND_DELETE:
 				// Initialize disk
-				FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS);
-
-				// Delete file
-				if (f_unlink((TCHAR *) &(packet->data[1])) == FR_OK)
+				if (FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS)
+						== FS_RESOURCE_MANAGER_SUCCESS)
 				{
-					FS_CRS_SendAck(FS_CRS_COMMAND_DELETE);
+					// Delete file
+					if (f_unlink((TCHAR *) &(packet->data[1])) == FR_OK)
+					{
+						FS_CRS_SendAck(FS_CRS_COMMAND_DELETE);
+					}
+					else
+					{
+						FS_CRS_SendNak(FS_CRS_COMMAND_DELETE);
+					}
+
+					// De-initialize disk
+					FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
 				}
 				else
 				{
 					FS_CRS_SendNak(FS_CRS_COMMAND_DELETE);
 				}
-
-				// De-initialize disk
-				FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
 				break;
 			case FS_CRS_COMMAND_READ:
 				// Initialize disk
-				FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS);
-
-				// Terminate file name
-				packet->data[packet->length] = 0;
-
-				// Open file
-				if (f_open(&file, (TCHAR *) &(packet->data[9]), FA_READ) == FR_OK)
+				if (FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS)
+						== FS_RESOURCE_MANAGER_SUCCESS)
 				{
-					// Initialize read stride and position
-					read_offset = *((uint32_t *) &(packet->data[1])) * FRAME_LENGTH;
-					read_stride = (*((uint32_t *) &(packet->data[5])) + 1) * FRAME_LENGTH;
-					read_pos = read_offset;
+					// Terminate file name
+					packet->data[packet->length] = 0;
 
-					// Initialize flow control
-					next_packet = 0;
-					next_ack = 0;
-					last_packet = -1;
-
-					// Start timeout timer
-					HW_TS_Start(ack_timer_id, TX_TIMEOUT_TICKS);
-					timeout_flag = 0;
-
-					if (f_lseek(&file, read_pos) == FR_OK)
+					// Open file
+					if (f_open(&file, (TCHAR *) &(packet->data[9]), FA_READ) == FR_OK)
 					{
-						FS_CRS_SendAck(FS_CRS_COMMAND_READ);
+						// Initialize read stride and position
+						read_offset = *((uint32_t *) &(packet->data[1])) * FRAME_LENGTH;
+						read_stride = (*((uint32_t *) &(packet->data[5])) + 1) * FRAME_LENGTH;
+						read_pos = read_offset;
 
-						// Call update task
-						UTIL_SEQ_SetTask(1<<CFG_TASK_FS_CRS_UPDATE_ID, CFG_SCH_PRIO_1);
+						// Initialize flow control
+						next_packet = 0;
+						next_ack = 0;
+						last_packet = -1;
 
-						next_state = FS_CRS_STATE_READ;
+						// Start timeout timer
+						HW_TS_Start(ack_timer_id, TX_TIMEOUT_TICKS);
+						timeout_flag = 0;
+
+						if (f_lseek(&file, read_pos) == FR_OK)
+						{
+							FS_CRS_SendAck(FS_CRS_COMMAND_READ);
+
+							// Call update task
+							UTIL_SEQ_SetTask(1<<CFG_TASK_FS_CRS_UPDATE_ID, CFG_SCH_PRIO_1);
+
+							next_state = FS_CRS_STATE_READ;
+						}
+					}
+
+					if (next_state == FS_CRS_STATE_IDLE)
+					{
+						FS_CRS_SendNak(FS_CRS_COMMAND_READ);
+
+						// De-initialize disk
+						FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
 					}
 				}
-
-				if (next_state == FS_CRS_STATE_IDLE)
+				else
 				{
 					FS_CRS_SendNak(FS_CRS_COMMAND_READ);
-
-					// De-initialize disk
-					FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
 				}
 				break;
 			case FS_CRS_COMMAND_WRITE:
 				// Initialize disk
-				FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS);
-
-				// Terminate file name
-				packet->data[packet->length] = 0;
-
-				// Open file
-				if (f_open(&file, (TCHAR *) &(packet->data[1]), FA_WRITE) == FR_OK)
+				if (FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS)
+						== FS_RESOURCE_MANAGER_SUCCESS)
 				{
-					FS_CRS_SendAck(FS_CRS_COMMAND_WRITE);
+					// Terminate file name
+					packet->data[packet->length] = 0;
 
-					// Initialize flow control
-					next_packet = 0;
+					// Open file
+					if (f_open(&file, (TCHAR *) &(packet->data[1]), FA_WRITE|FA_CREATE_ALWAYS) == FR_OK)
+					{
+						FS_CRS_SendAck(FS_CRS_COMMAND_WRITE);
 
-					// Start timeout timer
-					HW_TS_Start(ack_timer_id, RX_TIMEOUT_TICKS);
-					timeout_flag = 0;
+						// Initialize flow control
+						next_packet = 0;
 
-					next_state = FS_CRS_STATE_WRITE;
+						// Start timeout timer
+						HW_TS_Start(ack_timer_id, RX_TIMEOUT_TICKS);
+						timeout_flag = 0;
+
+						next_state = FS_CRS_STATE_WRITE;
+					}
+
+					if (next_state == FS_CRS_STATE_IDLE)
+					{
+						FS_CRS_SendNak(FS_CRS_COMMAND_WRITE);
+
+						// De-initialize disk
+						FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
+					}
 				}
-
-				if (next_state == FS_CRS_STATE_IDLE)
+				else
 				{
 					FS_CRS_SendNak(FS_CRS_COMMAND_WRITE);
-
-					// De-initialize disk
-					FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
 				}
 				break;
 			case FS_CRS_COMMAND_MK_DIR:
 				// Initialize disk
-				FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS);
-
-				// Create directory
-				if (f_mkdir((TCHAR *) &(packet->data[1])) == FR_OK)
+				if (FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS)
+						== FS_RESOURCE_MANAGER_SUCCESS)
 				{
-					FS_CRS_SendAck(FS_CRS_COMMAND_MK_DIR);
+					// Create directory
+					if (f_mkdir((TCHAR *) &(packet->data[1])) == FR_OK)
+					{
+						FS_CRS_SendAck(FS_CRS_COMMAND_MK_DIR);
+					}
+					else
+					{
+						FS_CRS_SendNak(FS_CRS_COMMAND_MK_DIR);
+					}
+
+					// De-initialize disk
+					FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
 				}
 				else
 				{
 					FS_CRS_SendNak(FS_CRS_COMMAND_MK_DIR);
 				}
-
-				// De-initialize disk
-				FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
 				break;
 			case FS_CRS_COMMAND_READ_DIR:
 				// Initialize disk
-				FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS);
-
-				// Terminate file name
-				packet->data[packet->length] = 0;
-
-				// Open directory
-				if (f_opendir(&dir, (TCHAR *) &(packet->data[1])) == FR_OK)
+				if (FS_ResourceManager_RequestResource(FS_RESOURCE_FATFS)
+						== FS_RESOURCE_MANAGER_SUCCESS)
 				{
-					FS_CRS_SendAck(FS_CRS_COMMAND_READ_DIR);
+					// Terminate file name
+					packet->data[packet->length] = 0;
 
-					// Initialize flow control
-					next_packet = 0;
+					// Open directory
+					if (f_opendir(&dir, (TCHAR *) &(packet->data[1])) == FR_OK)
+					{
+						FS_CRS_SendAck(FS_CRS_COMMAND_READ_DIR);
 
-					// Call update task
-					UTIL_SEQ_SetTask(1<<CFG_TASK_FS_CRS_UPDATE_ID, CFG_SCH_PRIO_1);
+						// Initialize flow control
+						next_packet = 0;
 
-					next_state = FS_CRS_STATE_DIR;
+						// Call update task
+						UTIL_SEQ_SetTask(1<<CFG_TASK_FS_CRS_UPDATE_ID, CFG_SCH_PRIO_1);
+
+						next_state = FS_CRS_STATE_DIR;
+					}
+					else
+					{
+						FS_CRS_SendNak(FS_CRS_COMMAND_READ_DIR);
+
+						// De-initialize disk
+						FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
+					}
 				}
 				else
 				{
 					FS_CRS_SendNak(FS_CRS_COMMAND_READ_DIR);
-
-					// De-initialize disk
-					FS_ResourceManager_ReleaseResource(FS_RESOURCE_FATFS);
 				}
 				break;
+			case FS_CRS_COMMAND_PING:
+				FS_CRS_SendAck(FS_CRS_COMMAND_PING);
+				break;
+			default:
+				FS_CRS_SendNak(packet->data[0]);
 			}
 		}
 	}
@@ -302,6 +349,7 @@ static FS_CRS_State_t FS_CRS_State_Dir(void)
 {
 	FS_CRS_State_t next_state = FS_CRS_STATE_DIR;
 	Custom_CRS_Packet_t *packet;
+	uint8_t *tx_buffer;
 	FILINFO fno;
 
 	if (!Custom_APP_IsConnected())
@@ -323,19 +371,22 @@ static FS_CRS_State_t FS_CRS_State_Dir(void)
 		}
 	}
 
-	while ((next_state == FS_CRS_STATE_DIR) && (packet = Custom_CRS_GetNextTxPacket()))
+	while ((next_state == FS_CRS_STATE_DIR) &&
+			(tx_buffer = BLE_TX_Queue_GetNextTxPacket()))
 	{
 		// Read a directory item
 		if (f_readdir(&dir, &fno) == FR_OK)
 		{
-			buffer[0] = ((next_packet++) & 0xff);
-			memcpy(buffer + 1, &fno.fsize, sizeof(fno.fsize));
-			memcpy(buffer + 5, &fno.fdate, sizeof(fno.fdate));
-			memcpy(buffer + 7, &fno.ftime, sizeof(fno.ftime));
-			buffer[9] = fno.fattrib;
-			memcpy(buffer + 10, fno.fname, sizeof(fno.fname));
+			tx_buffer[0] = FS_CRS_COMMAND_FILE_INFO;
+			tx_buffer[1] = ((next_packet++) & 0xff);
+			memcpy(&tx_buffer[2], &fno.fsize, sizeof(fno.fsize));
+			memcpy(&tx_buffer[6], &fno.fdate, sizeof(fno.fdate));
+			memcpy(&tx_buffer[8], &fno.ftime, sizeof(fno.ftime));
+			tx_buffer[10] = fno.fattrib;
+			memcpy(&tx_buffer[11], fno.fname, sizeof(fno.fname));
 
-			FS_CRS_SendPacket(FS_CRS_COMMAND_FILE_INFO, buffer, 23);
+			BLE_TX_Queue_SendNextTxPacket(CUSTOM_STM_FT_PACKET_OUT, 24,
+					&SizeFt_Packet_Out, FS_CRS_TxCallback);
 
 			if (fno.fname[0] == 0)
 			{
@@ -364,6 +415,7 @@ static FS_CRS_State_t FS_CRS_State_Read(void)
 {
 	FS_CRS_State_t next_state = FS_CRS_STATE_READ;
 	Custom_CRS_Packet_t *packet;
+	uint8_t *tx_buffer;
 	UINT br;
 
 	if (!Custom_APP_IsConnected())
@@ -410,19 +462,21 @@ static FS_CRS_State_t FS_CRS_State_Read(void)
 	}
 
 	while ((next_state == FS_CRS_STATE_READ) &&
-			(packet = Custom_CRS_GetNextTxPacket()) &&
+			(tx_buffer = BLE_TX_Queue_GetNextTxPacket()) &&
 			(next_packet < next_ack + FS_CRS_WINDOW_LENGTH) &&
 			(next_packet < last_packet))
 	{
-		buffer[0] = (next_packet & 0xff);
+		tx_buffer[0] = FS_CRS_COMMAND_FILE_DATA;
+		tx_buffer[1] = (next_packet & 0xff);
 
 		if (f_eof(&file))
 		{
 			// Send empty buffer to signal end of file
-			FS_CRS_SendPacket(FS_CRS_COMMAND_FILE_DATA, buffer, 1);
+			BLE_TX_Queue_SendNextTxPacket(CUSTOM_STM_FT_PACKET_OUT, 2,
+					&SizeFt_Packet_Out, FS_CRS_TxCallback);
 			last_packet = ++next_packet;
 		}
-		else if (f_read(&file, &buffer[1], FRAME_LENGTH, &br) == FR_OK)
+		else if (f_read(&file, &tx_buffer[2], FRAME_LENGTH, &br) == FR_OK)
 		{
 			if (read_stride > FRAME_LENGTH)
 			{
@@ -431,7 +485,8 @@ static FS_CRS_State_t FS_CRS_State_Read(void)
 			}
 
 			// Send data
-			FS_CRS_SendPacket(FS_CRS_COMMAND_FILE_DATA, buffer, br + 1);
+			BLE_TX_Queue_SendNextTxPacket(CUSTOM_STM_FT_PACKET_OUT, br + 2,
+					&SizeFt_Packet_Out, FS_CRS_TxCallback);
 			++next_packet;
 		}
 		else
@@ -492,7 +547,7 @@ static FS_CRS_State_t FS_CRS_State_Write(void)
 					if (packet->data[1] == (next_packet & 0xff))
 #endif
 					{
-						f_write(&file, &packet->data[1], packet->length - 1, &bw);
+						f_write(&file, &packet->data[2], packet->length - 2, &bw);
 						FS_CRS_SendPacket(FS_CRS_COMMAND_FILE_ACK, &packet->data[1], 1);
 						++next_packet;
 

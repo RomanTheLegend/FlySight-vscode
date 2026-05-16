@@ -72,6 +72,8 @@ extern "C" {
 
 #define SCSI_SEND_DIAGNOSTIC                        0x1DU
 #define SCSI_READ_FORMAT_CAPACITIES                 0x23U
+#define SCSI_SYNCHRONIZE_CACHE10                    0x35U
+#define SCSI_SYNCHRONIZE_CACHE16                    0x91U
 
 #define NO_SENSE                                    0U
 #define RECOVERED_ERROR                             1U

@@ -38,6 +38,9 @@
 #include "mag.h"
 #include "mode.h"
 #include "sensor.h"
+#include "start_control.h"
+#include "state.h"
+#include "stm32_seq.h"
 #include "vbat.h"
 #include "vbus.h"
 /* USER CODE END Includes */
@@ -87,6 +90,8 @@ DMA_HandleTypeDef hdma_spi1_tx;
 DMA_HandleTypeDef hdma_spi2_rx;
 DMA_HandleTypeDef hdma_spi2_tx;
 
+TIM_HandleTypeDef htim1;
+
 /* USER CODE BEGIN PV */
 /* Transfer state */
 volatile MAIN_TransferStateTypeDef main_transfer_state = TRANSFER_WAIT;
@@ -98,27 +103,29 @@ static uint8_t watchdog_timer_id;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
+static void MX_RF_Init(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_IPCC_Init(void);
 static void MX_RTC_Init(void);
 static void MX_I2C3_Init(void);
 static void MX_SPI1_Init(void);
-static void MX_RF_Init(void);
+static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-static void Watchdog_Timer(void)
-{
-  /* Timer only exists to force wake-up */
-}
-
-void UTIL_SEQ_PostIdle(void)
+static void Watchdog_Update(void)
 {
   WRITE_REG(IWDG->KR, IWDG_KEY_RELOAD);
+}
+
+static void Watchdog_Timer(void)
+{
+  /* Call watchdog update task */
+  UTIL_SEQ_SetTask(1<<CFG_TASK_FS_WATCHDOG_UPDATE_ID, CFG_SCH_PRIO_1);
 }
 /* USER CODE END 0 */
 
@@ -128,6 +135,7 @@ void UTIL_SEQ_PostIdle(void)
   */
 int main(void)
 {
+
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -157,17 +165,20 @@ int main(void)
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
+  MX_RF_Init();
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_RTC_Init();
   MX_I2C3_Init();
   MX_SPI1_Init();
-  MX_RF_Init();
+  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
+  FS_State_Init();
   FS_IMU_Init();
   FS_Mag_Init();
   FS_Baro_Init();
   FS_Hum_Init();
+  FS_StartControl_RegisterTasks();
   /* USER CODE END 2 */
 
   /* Init code for STM32_WPAN */
@@ -178,10 +189,12 @@ int main(void)
   /* Reset watchdog timer */
   WRITE_REG(IWDG->KR, IWDG_KEY_RELOAD);
 
-  /* Initialize watchdog reset timer */
+  /* Initialize watchdog reset timer and task */
+  UTIL_SEQ_RegTask(1<<CFG_TASK_FS_WATCHDOG_UPDATE_ID, UTIL_SEQ_RFU, Watchdog_Update);
   HW_TS_Create(CFG_TIM_PROC_ID_ISR, &watchdog_timer_id, hw_ts_Repeated, Watchdog_Timer);
   HW_TS_Start(watchdog_timer_id, WATCHDOG_RESET_RATE);
 
+  FS_LED_Init();
   FS_Mode_Init();
   FS_Button_Init();
   FS_VBUS_Init();
@@ -206,14 +219,6 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Macro to configure the PLL multiplication factor
-  */
-  __HAL_RCC_PLL_PLLM_CONFIG(RCC_PLLM_DIV5);
-
-  /** Macro to configure the PLL clock source
-  */
-  __HAL_RCC_PLL_PLLSOURCE_CONFIG(RCC_PLLSOURCE_HSE);
-
   /** Configure LSE Drive Capability
   */
   HAL_PWR_EnableBkUpAccess();
@@ -235,7 +240,13 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.LSIState = RCC_LSI_ON;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV5;
+  RCC_OscInitStruct.PLL.PLLN = 20;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -246,14 +257,14 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK4|RCC_CLOCKTYPE_HCLK2
                               |RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSE;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLK2Divider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.AHBCLK2Divider = RCC_SYSCLK_DIV2;
   RCC_ClkInitStruct.AHBCLK4Divider = RCC_SYSCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
   {
     Error_Handler();
   }
@@ -357,7 +368,7 @@ void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x00707CBB;
+  hi2c1.Init.Timing = 0x10707DBC;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -405,7 +416,7 @@ static void MX_I2C3_Init(void)
 
   /* USER CODE END I2C3_Init 1 */
   hi2c3.Instance = I2C3;
-  hi2c3.Init.Timing = 0x00707CBB;
+  hi2c3.Init.Timing = 0x10707DBC;
   hi2c3.Init.OwnAddress1 = 0;
   hi2c3.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c3.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -704,7 +715,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_HIGH;
   hspi1.Init.CLKPhase = SPI_PHASE_2EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -762,6 +773,82 @@ void MX_SPI2_Init(void)
 }
 
 /**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 31;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 99;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.BreakFilter = 0;
+  sBreakDeadTimeConfig.BreakAFMode = TIM_BREAK_AFMODE_INPUT;
+  sBreakDeadTimeConfig.Break2State = TIM_BREAK2_DISABLE;
+  sBreakDeadTimeConfig.Break2Polarity = TIM_BREAK2POLARITY_HIGH;
+  sBreakDeadTimeConfig.Break2Filter = 0;
+  sBreakDeadTimeConfig.Break2AFMode = TIM_BREAK_AFMODE_INPUT;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+  HAL_TIM_MspPostInit(&htim1);
+
+}
+
+/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -774,31 +861,31 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Channel1_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 3, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
   /* DMA1_Channel2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 3, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
   /* DMA1_Channel3_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 3, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
   /* DMA1_Channel4_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel4_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel4_IRQn, 3, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel4_IRQn);
   /* DMA1_Channel5_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 3, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn);
   /* DMA1_Channel6_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel6_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel6_IRQn, 3, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel6_IRQn);
   /* DMA2_Channel1_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Channel1_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Channel1_IRQn, 1, 0);
   HAL_NVIC_EnableIRQ(DMA2_Channel1_IRQn);
   /* DMA2_Channel2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Channel2_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Channel2_IRQn, 1, 0);
   HAL_NVIC_EnableIRQ(DMA2_Channel2_IRQn);
   /* DMA2_Channel3_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Channel3_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA2_Channel3_IRQn, 3, 0);
   HAL_NVIC_EnableIRQ(DMA2_Channel3_IRQn);
 
 }
@@ -835,8 +922,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(VCC_EN_GPIO_Port, VCC_EN_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, LED_R_Pin|MIC_EN_Pin|VBAT_EN_Pin|GNSS_SAFEBOOT_N_Pin
-                          |LED_G_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, MIC_EN_Pin|VBAT_EN_Pin|GNSS_SAFEBOOT_N_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : VBUS_DIV_Pin */
   GPIO_InitStruct.Pin = VBUS_DIV_Pin;
@@ -892,7 +978,7 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin : HUM_DRDY_Pin */
   GPIO_InitStruct.Pin = HUM_DRDY_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(HUM_DRDY_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : VCC_EN_Pin */
@@ -902,8 +988,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(VCC_EN_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LED_R_Pin MIC_EN_Pin VBAT_EN_Pin LED_G_Pin */
-  GPIO_InitStruct.Pin = LED_R_Pin|MIC_EN_Pin|VBAT_EN_Pin|LED_G_Pin;
+  /*Configure GPIO pins : MIC_EN_Pin VBAT_EN_Pin */
+  GPIO_InitStruct.Pin = MIC_EN_Pin|VBAT_EN_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -929,19 +1015,19 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GNSS_PPS_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI2_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI2_IRQn, 2, 0);
   HAL_NVIC_EnableIRQ(EXTI2_IRQn);
 
-  HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI3_IRQn, 2, 0);
   HAL_NVIC_EnableIRQ(EXTI3_IRQn);
 
-  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 2, 0);
   HAL_NVIC_EnableIRQ(EXTI4_IRQn);
 
-  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 2, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 2, 0);
   HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
@@ -1016,6 +1102,18 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
     FS_IMU_TransferError();
 }
 
+void HAL_I2C_MasterTxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+  if (hi2c == &hi2c3)
+    FS_Sensor_TransferComplete();
+}
+
+void HAL_I2C_MasterRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+  if (hi2c == &hi2c3)
+    FS_Sensor_TransferComplete();
+}
+
 void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c)
 {
   if (hi2c == &hi2c3)
@@ -1038,11 +1136,6 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
   if (hadc == &hadc1)
     FS_VBAT_ConversionComplete();
-}
-
-void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc)
-{
-  Error_Handler();
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)

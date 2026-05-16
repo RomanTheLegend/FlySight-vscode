@@ -69,6 +69,11 @@ PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t SystemSpareEvtBuffer[sizeof(
 PLACE_IN_SECTION("MB_MEM2") ALIGN(4) static uint8_t BleSpareEvtBuffer[sizeof(TL_PacketHeader_t) + TL_EVT_HDR_SIZE + 255];
 
 /* USER CODE BEGIN PV */
+#if (CFG_LPM_SUPPORTED == 1)
+static volatile uint8_t CPU2_Started = 0U;
+static uint8_t SystemClockHandoffToHse = 0U;
+static uint8_t SystemClockCommandPending = 0U;
+#endif /* CFG_LPM_SUPPORTED == 1 */
 
 /* USER CODE END PV */
 
@@ -322,7 +327,6 @@ static void appe_Tl_Init(void)
 {
   TL_MM_Config_t tl_mm_config;
   SHCI_TL_HciInitConf_t SHci_Tl_Init_Conf;
-
   /**< Reference table initialization */
   TL_Init();
 
@@ -496,6 +500,9 @@ static void APPE_SysEvtReadyProcessing(void * pPayload)
 
     APP_BLE_Init();
     UTIL_LPM_SetOffMode(1U << CFG_LPM_APP, UTIL_LPM_ENABLE);
+#if (CFG_LPM_SUPPORTED == 1)
+    CPU2_Started = 1U;
+#endif /* CFG_LPM_SUPPORTED == 1 */
   }
   else if (p_sys_ready_event->sysevt_ready_rsp == FUS_FW_RUNNING)
   {
@@ -546,9 +553,9 @@ void HAL_Delay(uint32_t Delay)
     /**
      * This option is used to ensure that store operations are completed
      */
-  #if defined (__CC_ARM)
+  #if defined (__CC_ARM) || defined (__ARMCC_VERSION)
     __force_stores();
-  #endif /* __CC_ARM */
+  #endif /* __ARMCC_VERSION */
 
     __WFI();
   }
@@ -576,6 +583,64 @@ void UTIL_SEQ_Idle(void)
   return;
 }
 
+void UTIL_SEQ_PreIdle(void)
+{
+#if (CFG_LPM_SUPPORTED == 1)
+  SHCI_CmdStatus_t status;
+
+  if ((SystemClockCommandPending == 0U) &&
+      (SystemClockHandoffToHse == 0U) &&
+      (CPU2_Started != 0U) &&
+      (FS_Mode_State() == FS_MODE_STATE_SLEEP) &&
+      (UTIL_LPM_GetMode() != UTIL_LPM_SLEEPMODE) &&
+      (LL_RCC_GetSysClkSource() == LL_RCC_SYS_CLKSOURCE_STATUS_PLL))
+  {
+    LL_RCC_HSE_Enable();
+
+    SystemClockCommandPending = 1U;
+    status = SHCI_C2_SetSystemClock(SET_SYSTEM_CLOCK_PLL_ON_TO_HSE);
+    SystemClockCommandPending = 0U;
+
+    if (status != SHCI_Success)
+    {
+      Error_Handler();
+    }
+
+    SystemClockHandoffToHse = 1U;
+    SystemCoreClockUpdate();
+    HAL_InitTick(HAL_GetTickPrio());
+  }
+#endif /* CFG_LPM_SUPPORTED == 1 */
+  return;
+}
+
+void UTIL_SEQ_PostIdle(void)
+{
+#if (CFG_LPM_SUPPORTED == 1)
+  SHCI_CmdStatus_t status;
+
+  if ((SystemClockCommandPending == 0U) &&
+      (SystemClockHandoffToHse != 0U))
+  {
+    LL_RCC_PLL_Enable();
+
+    SystemClockCommandPending = 1U;
+    status = SHCI_C2_SetSystemClock(SET_SYSTEM_CLOCK_HSE_TO_PLL);
+    SystemClockCommandPending = 0U;
+
+    if (status != SHCI_Success)
+    {
+      Error_Handler();
+    }
+
+    SystemClockHandoffToHse = 0U;
+    SystemCoreClockUpdate();
+    HAL_InitTick(HAL_GetTickPrio());
+  }
+#endif /* CFG_LPM_SUPPORTED == 1 */
+  return;
+}
+
 /**
   * @brief  This function is called by the scheduler each time an event
   *         is pending.
@@ -585,6 +650,15 @@ void UTIL_SEQ_Idle(void)
   */
 void UTIL_SEQ_EvtIdle(UTIL_SEQ_bm_t task_id_bm, UTIL_SEQ_bm_t evt_waited_bm)
 {
+  (void)task_id_bm;
+  (void)evt_waited_bm;
+
+#if (CFG_LPM_SUPPORTED == 1)
+  if (SystemClockCommandPending != 0U)
+  {
+    return;
+  }
+#endif /* CFG_LPM_SUPPORTED == 1 */
   UTIL_SEQ_Run(UTIL_SEQ_DEFAULT);
   return;
 }

@@ -26,8 +26,8 @@
 
 #include <stdbool.h>
 
-#define GNSS_RX_BUF_LEN		512						// Circular buffer for UART
-#define GNSS_RAW_BUF_LEN	(GNSS_RX_BUF_LEN / 2)	// Circular buffer for raw output
+#define GNSS_RX_BUF_LEN   2048  // Circular buffer for UART
+#define GNSS_RAW_BUF_LEN  512   // Circular buffer for raw output
 
 typedef struct
 {
@@ -45,17 +45,18 @@ typedef struct
 	int32_t  lat;      // Latitude                     (deg)
 	int32_t  hMSL;     // Height above mean sea level  (mm)
 
-	int32_t  velN;     // North velocity               (cm/s)
-	int32_t  velE;     // East velocity                (cm/s)
-	int32_t  velD;     // Down velocity                (cm/s)
+	int32_t  velN;     // North velocity               (mm/s)
+	int32_t  velE;     // East velocity                (mm/s)
+	int32_t  velD;     // Down velocity                (mm/s)
 
 	int32_t  speed;    // 3D speed                     (cm/s)
 	int32_t  gSpeed;   // Ground speed                 (cm/s)
+	int32_t  heading;  // 2D heading                   (deg)
 
 	uint32_t tAcc;     // Time accuracy estimate       (ns)
 	uint32_t hAcc;     // Horizontal accuracy estimate (mm)
 	uint32_t vAcc;     // Vertical accuracy estimate   (mm)
-	uint32_t sAcc;     // Speed accuracy estimate      (cm/s)
+	uint32_t sAcc;     // Speed accuracy estimate      (mm/s)
 
 	uint8_t  gpsFix;   // GPS fix type
 	uint8_t  numSV;    // Number of SVs in solution
@@ -63,10 +64,16 @@ typedef struct
 
 typedef struct
 {
-	uint32_t time;		// ms
+	uint64_t time;		// us
 	uint32_t towMS;     // Time pulse time of week     (ms)
 	uint16_t week;      // Time pulse week number
 } FS_GNSS_Time_t;
+
+typedef struct
+{
+	uint32_t towMS;     // Time pulse time of week     (ms)
+	uint16_t week;      // Time pulse week number
+} FS_GNSS_Int_t;
 
 typedef struct
 {
@@ -80,13 +87,16 @@ void FS_GNSS_Start(void);
 void FS_GNSS_Stop(void);
 
 const FS_GNSS_Data_t *FS_GNSS_GetData(void);
-void FS_GNSS_DataReady_Callback(void);
+void FS_GNSS_DataReady_SetCallback(void (*callback)(void));
 
 void FS_GNSS_Timepulse(void);
 const FS_GNSS_Time_t *FS_GNSS_GetTime(void);
-void FS_GNSS_TimeReady_Callback(bool validTime);
+void FS_GNSS_TimeReady_SetCallback(void (*callback)(bool));
 
 const FS_GNSS_Raw_t *FS_GNSS_GetRaw(void);
-void FS_GNSS_RawReady_Callback(void);
+void FS_GNSS_RawReady_SetCallback(void (*callback)(void));
+
+const FS_GNSS_Int_t *FS_GNSS_GetInt(void);
+void FS_GNSS_IntReady_SetCallback(void (*callback)(void));
 
 #endif /* GNSS_H_ */

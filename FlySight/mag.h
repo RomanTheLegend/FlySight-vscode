@@ -26,7 +26,7 @@
 
 typedef struct
 {
-	uint32_t time;			// ms
+	uint64_t time;			// us
 	int16_t x;				// gauss * 1000
 	int16_t y;				// gauss * 1000
 	int16_t z;				// gauss * 1000
@@ -34,7 +34,7 @@ typedef struct
 } FS_Mag_Data_t;
 
 void FS_Mag_Init(void);
-void FS_Mag_Start(void);
+HAL_StatusTypeDef FS_Mag_Start(void);
 void FS_Mag_Stop(void);
 void FS_Mag_Read(void);
 const FS_Mag_Data_t *FS_Mag_GetData(void);

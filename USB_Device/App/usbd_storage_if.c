@@ -28,6 +28,7 @@
 
 /* USER CODE BEGIN INCLUDE */
 #include "stm32_adafruit_sd.h"
+#include "usb_storage_cache.h"
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,8 +37,6 @@
 
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
-void (*beginActivityCallback)(void) = 0;
-void (*endActivityCallback)(void) = 0;
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -155,6 +154,7 @@ static int8_t STORAGE_Write_FS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uin
 static int8_t STORAGE_GetMaxLun_FS(void);
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_DECLARATION */
+static int8_t STORAGE_Sync_FS(uint8_t lun);
 
 /* USER CODE END PRIVATE_FUNCTIONS_DECLARATION */
 
@@ -171,7 +171,8 @@ USBD_StorageTypeDef USBD_Storage_Interface_fops_FS =
   STORAGE_Read_FS,
   STORAGE_Write_FS,
   STORAGE_GetMaxLun_FS,
-  (int8_t *)STORAGE_Inquirydata_FS
+  (int8_t *)STORAGE_Inquirydata_FS,
+  STORAGE_Sync_FS
 };
 
 /* Private functions ---------------------------------------------------------*/
@@ -183,7 +184,17 @@ USBD_StorageTypeDef USBD_Storage_Interface_fops_FS =
 int8_t STORAGE_Init_FS(uint8_t lun)
 {
   /* USER CODE BEGIN 2 */
-  BSP_SD_Init();
+  UNUSED(lun);
+
+  if (BSP_SD_Init() != BSP_SD_OK)
+  {
+    return (USBD_FAIL);
+  }
+  if (FS_USBStorageCache_Init() < 0)
+  {
+    return (USBD_FAIL);
+  }
+
   return (USBD_OK);
   /* USER CODE END 2 */
 }
@@ -205,9 +216,12 @@ int8_t STORAGE_GetCapacity_FS(uint8_t lun, uint32_t *block_num, uint16_t *block_
   {
 	ret = -1;
   }
-
-  *block_num = info.LogBlockNbr;
-  *block_size = info.LogBlockSize;
+  else
+  {
+    FS_USBStorageCache_SetCapacity(info.LogBlockNbr);
+    *block_num = info.LogBlockNbr;
+    *block_size = info.LogBlockSize;
+  }
 
   return ret;
   /* USER CODE END 3 */
@@ -258,23 +272,9 @@ int8_t STORAGE_IsWriteProtected_FS(uint8_t lun)
 int8_t STORAGE_Read_FS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t blk_len)
 {
   /* USER CODE BEGIN 6 */
-  int8_t ret = -1;
-  uint32_t timeout = 100000;
+  UNUSED(lun);
 
-  if (beginActivityCallback) beginActivityCallback();
-  BSP_SD_ReadBlocks((uint32_t *)buf, blk_addr, blk_len, SD_DATATIMEOUT);
-  if (endActivityCallback) endActivityCallback();
-
-  while(BSP_SD_GetCardState() != BSP_SD_OK)
-  {
-	if (timeout-- == 0)
-	{
-	  return ret;
-	}
-  }
-  ret = 0;
-
-  return ret;
+  return FS_USBStorageCache_Read(buf, blk_addr, blk_len);
   /* USER CODE END 6 */
 }
 
@@ -286,23 +286,9 @@ int8_t STORAGE_Read_FS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t bl
 int8_t STORAGE_Write_FS(uint8_t lun, uint8_t *buf, uint32_t blk_addr, uint16_t blk_len)
 {
   /* USER CODE BEGIN 7 */
-  int8_t ret = -1;
-  uint32_t timeout = 100000;
+  UNUSED(lun);
 
-  if (beginActivityCallback) beginActivityCallback();
-  BSP_SD_WriteBlocks((uint32_t *)buf, blk_addr, blk_len, SD_DATATIMEOUT);
-  if (endActivityCallback) endActivityCallback();
-
-  while(BSP_SD_GetCardState() != BSP_SD_OK)
-  {
-	if (timeout-- == 0)
-	{
-	  return ret;
-	}
-  }
-  ret = 0;
-
-  return ret;
+  return FS_USBStorageCache_Write(buf, blk_addr, blk_len);
   /* USER CODE END 7 */
 }
 
@@ -319,10 +305,26 @@ int8_t STORAGE_GetMaxLun_FS(void)
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
+static int8_t STORAGE_Sync_FS(uint8_t lun)
+{
+  UNUSED(lun);
+
+  return FS_USBStorageCache_Flush();
+}
+
+int8_t USBD_SyncStorage(void)
+{
+  return FS_USBStorageCache_Flush();
+}
+
+int8_t USBD_DeInitStorage(void)
+{
+  return FS_USBStorageCache_DeInit();
+}
+
 void USBD_SetActivityCallbacks(void (*begin)(void), void (*end)(void))
 {
-  beginActivityCallback = begin;
-  endActivityCallback = end;
+  FS_USBStorageCache_SetActivityCallbacks(begin, end);
 }
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 

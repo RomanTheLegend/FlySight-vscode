@@ -26,7 +26,7 @@
 
 typedef struct
 {
-	uint32_t time;		// ms
+	uint64_t time;		// us
 	uint16_t voltage;   // Battery voltage
 } FS_VBAT_Data_t;
 
