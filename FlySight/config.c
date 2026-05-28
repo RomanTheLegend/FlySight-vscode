@@ -359,6 +359,8 @@ void FS_Config_Init(void)
 	config.al_mode        = 1;
 	config.al_rate        = 1000;
 	config.num_al_lines   = 0;
+	config.al_target_lat  = 0;
+	config.al_target_lon  = 0;
 
 	// IMPORTANT: Navigation disabled by default
 	config.enable_nav     = 0;
@@ -455,8 +457,10 @@ FS_Config_Result_t FS_Config_Read(const char *filename)
 		HANDLE_VALUE("Gyro_ODR",  config.gyro_odr,     val, val >= 0 && val <= 10);
 		HANDLE_VALUE("Gyro_FS",   config.gyro_fs,      val, val >= 0 && val <= 3);
 
-		HANDLE_VALUE("Lat",       config.lat,          val, val >= -900000000 && val <= 900000000);
-		HANDLE_VALUE("Lon",       config.lon,          val, val >= -1800000000 && val <= 1800000000);
+		HANDLE_VALUE("Lat",        config.lat,           val, val >= -900000000 && val <= 900000000);
+		HANDLE_VALUE("Lon",        config.lon,           val, val >= -1800000000 && val <= 1800000000);
+		HANDLE_VALUE("Target_Lat", config.al_target_lat, val, val >= -900000000 && val <= 900000000);
+		HANDLE_VALUE("Target_Lon", config.al_target_lon, val, val >= -1800000000 && val <= 1800000000);
 		HANDLE_VALUE("Bearing",   config.bearing,      val, val >= 0 && val <= 360);
 		HANDLE_VALUE("End_Nav",   config.end_nav,      val * 1000, TRUE);
 		HANDLE_VALUE("Max_Dist",  config.max_dist,     val, val >= 0 && val <= 10000);
