@@ -178,6 +178,9 @@ typedef struct
 	FS_Config_AL_Line_t al_lines[FS_CONFIG_MAX_AL_LINES];
 	uint8_t  num_al_lines;
 
+	int32_t  al_target_lat;    /* competition run target, 1e-7 deg */
+	int32_t  al_target_lon;
+
 	// Flag to control whether navigation modes are allowed
 	uint8_t  enable_nav;
 } FS_Config_Data_t;
