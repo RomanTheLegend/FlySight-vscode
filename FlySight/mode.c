@@ -592,6 +592,16 @@ static void FS_Mode_Update(void)
 
             /* Notify BLE about the updated mode (cast enum -> 1-byte) */
             Custom_Mode_Update((uint8_t) nextMode);
+
+            /* Re-check VBUS on every transition to SLEEP.  A plug-in that
+             * occurred while in another mode has its VBUS_HIGH event silently
+             * ignored by that mode's handler.  Checking here ensures USB mode
+             * (and charging) starts even in that case. */
+            if (nextMode == FS_MODE_STATE_SLEEP &&
+                HAL_GPIO_ReadPin(VBUS_DIV_GPIO_Port, VBUS_DIV_Pin))
+            {
+                FS_Mode_PushQueue(FS_MODE_EVENT_VBUS_HIGH);
+            }
         }
 
         if ((pending_terminal_action != FS_TERMINAL_ACTION_NONE) &&
