@@ -286,8 +286,11 @@ void UTIL_SEQ_Run( UTIL_SEQ_bm_t Mask_bm )
     }
     UTIL_SEQ_EXIT_CRITICAL_SECTION( );
 
-    /* Execute the task */
-    TaskCb[CurrentTaskIdx]( );
+    /* Execute the task — skip if callback was never registered */
+    if (TaskCb[CurrentTaskIdx] != NULL)
+    {
+      TaskCb[CurrentTaskIdx]( );
+    }
 
     local_taskset = TaskSet;
     local_evtset = EvtSet;
