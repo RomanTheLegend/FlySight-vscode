@@ -25,7 +25,6 @@
 
 #include "main.h"
 #include "app_common.h"
-#include "dbg_trace.h"
 #include "gnss.h"
 #include "ff.h"
 #include "stm32_seq.h"
@@ -35,27 +34,28 @@
 
 /* ---- Constants ----------------------------------------------------------- */
 
-#define MOCK_FILE_PATH  "MOCK.CSV"
-#define MOCK_TIMER_MS   200u
-#define MOCK_TIMER_RATE (MOCK_TIMER_MS * 1000u / CFG_TS_TICK_VAL)
-#define MOCK_LINE_LEN   220
+#define MOCK_FILE_PATH   "MOCK.CSV"
+#define MOCK_TIMER_MS    200u
+#define MOCK_TIMER_RATE  (MOCK_TIMER_MS * 1000u / CFG_TS_TICK_VAL)
+#define MOCK_LINE_LEN    220
+#define MOCK_MAX_GAP_MS  5000u   /* gaps wider than this are compressed */
+#define MOCK_POST_GAP_MS  500u   /* playback delay used for a compressed gap */
 
 /* ---- Static state -------------------------------------------------------- */
 
 static FIL  s_file;
-static bool s_open       = false;
-static bool s_eof        = false;
+static bool s_open = false;
+static bool s_eof  = false;
 
 static FS_GNSS_Data_t s_curr;
-static uint32_t       s_curr_rel_ms;
+static uint32_t       s_curr_csv_ts;   /* ms-from-midnight of current record */
 
 static FS_GNSS_Data_t s_next;
-static uint32_t       s_next_rel_ms;
+static uint32_t       s_next_csv_ts;   /* ms-from-midnight of next record */
+static uint32_t       s_next_play_at;  /* HAL_GetTick() when to inject s_next */
 static bool           s_next_valid;
 
-static uint32_t s_origin_ms;   /* CSV timestamp of first data row (ms from midnight) */
-static uint32_t s_start_tick;  /* HAL_GetTick() at playback start */
-static uint8_t  s_timer_id;
+static uint8_t s_timer_id;
 
 /* ---- Timestamp parser ----------------------------------------------------- */
 
@@ -92,23 +92,40 @@ static uint32_t ParseTimestampMs(const char *ts)
     return ms;
 }
 
+/* ---- Gap computation ------------------------------------------------------ */
+
+/*
+ * Compute the playback delay between two consecutive CSV timestamps.
+ * Handles midnight wrap.  Gaps wider than MOCK_MAX_GAP_MS are compressed
+ * to MOCK_POST_GAP_MS.
+ */
+static uint32_t ComputeGapMs(uint32_t from_ts, uint32_t to_ts)
+{
+    uint32_t delta = (to_ts >= from_ts)
+                   ? (to_ts - from_ts)
+                   : (to_ts + 24u * 3600u * 1000u - from_ts);
+
+    if (delta > MOCK_MAX_GAP_MS)
+        delta = MOCK_POST_GAP_MS;
+
+    return delta;
+}
+
 /* ---- CSV row parser ------------------------------------------------------- */
 
 /*
- * Parse one comma-separated data row into *d and compute its ms offset from
- * s_origin_ms.  buf is modified in-place (strtok).
- * s_origin_ms must be initialised before the first call.
+ * Parse one comma-separated data row into *d.
+ * Returns the raw ms-from-midnight timestamp in *csv_ts_out.
+ * buf is modified in-place (strtok).
  */
-static bool ParseRow(char *buf, uint32_t *rel_ms_out, FS_GNSS_Data_t *d)
+static bool ParseRow(char *buf, uint32_t *csv_ts_out, FS_GNSS_Data_t *d)
 {
     char *tok;
 
     memset(d, 0, sizeof(*d));
 
     tok = strtok(buf, ","); if (!tok) return false;
-    uint32_t ts_ms = ParseTimestampMs(tok);
-    if (ts_ms < s_origin_ms) ts_ms += 24u * 3600u * 1000u;  /* midnight wrap */
-    *rel_ms_out = ts_ms - s_origin_ms;
+    *csv_ts_out = ParseTimestampMs(tok);
 
     tok = strtok(NULL, ","); if (!tok) return false;
     d->lat = (int32_t)(atof(tok) * 1e7);
@@ -154,12 +171,12 @@ static bool ParseRow(char *buf, uint32_t *rel_ms_out, FS_GNSS_Data_t *d)
 
     /* col 13: headAcc — skip */
 
-    d->iTOW = *rel_ms_out;
+    d->iTOW = *csv_ts_out;
     return true;
 }
 
 /* Read and parse the next non-empty data line from s_file. */
-static bool ReadNext(uint32_t *rel_ms, FS_GNSS_Data_t *d)
+static bool ReadNext(uint32_t *csv_ts, FS_GNSS_Data_t *d)
 {
     static char buf[MOCK_LINE_LEN];
 
@@ -168,7 +185,7 @@ static bool ReadNext(uint32_t *rel_ms, FS_GNSS_Data_t *d)
         size_t len = strcspn(buf, "\r\n");
         if (len == 0) continue;
         buf[len] = '\0';
-        if (ParseRow(buf, rel_ms, d)) return true;
+        if (ParseRow(buf, csv_ts, d)) return true;
     }
     s_eof = true;
     return false;
@@ -193,32 +210,22 @@ void FS_GNSS_Mock_Init(void)
     f_gets(buf, sizeof(buf), &s_file);
     f_gets(buf, sizeof(buf), &s_file);
 
-    /* Read first data row */
+    /* Read and parse the first data row */
     if (!f_gets(buf, sizeof(buf), &s_file)) goto fail;
     buf[strcspn(buf, "\r\n")] = '\0';
 
-    /* Extract origin timestamp before strtok destroys the buffer */
     {
-        const char *comma = strchr(buf, ',');
-        size_t ts_len = comma ? (size_t)(comma - buf) : strlen(buf);
-        char ts_buf[32];
-        if (ts_len >= sizeof(ts_buf)) ts_len = sizeof(ts_buf) - 1;
-        memcpy(ts_buf, buf, ts_len);
-        ts_buf[ts_len] = '\0';
-        s_origin_ms = ParseTimestampMs(ts_buf);
+        uint32_t first_ts;
+        if (!ParseRow(buf, &first_ts, &s_curr)) goto fail;
+        s_curr_csv_ts = first_ts;
     }
 
-    /* Parse the first row (rel_ms will be 0 since origin == this row's ts) */
-    {
-        uint32_t rel;
-        if (!ParseRow(buf, &rel, &s_curr)) goto fail;
-        s_curr_rel_ms = 0;
+    /* Pre-load the look-ahead record and schedule when to fire it */
+    s_next_valid = ReadNext(&s_next_csv_ts, &s_next);
+    if (s_next_valid) {
+        uint32_t gap = ComputeGapMs(s_curr_csv_ts, s_next_csv_ts);
+        s_next_play_at = HAL_GetTick() + gap;
     }
-
-    /* Pre-load the next record for the look-ahead */
-    s_next_valid = ReadNext(&s_next_rel_ms, &s_next);
-
-    s_start_tick = HAL_GetTick();
 
     /* Deliver first record immediately */
     FS_GNSS_InjectData(&s_curr);
@@ -252,24 +259,37 @@ static void MockTimer(void)
 
 /*
  * Called from the sequencer every MOCK_TIMER_MS ms.
- * Advances the current record whenever the wall-clock elapsed time has
- * passed the next record's CSV timestamp offset.
+ * Advances playback whenever wall-clock time has reached the scheduled
+ * fire time for the next record.  Timestamp gaps wider than
+ * MOCK_MAX_GAP_MS are compressed to MOCK_POST_GAP_MS.
  */
 static void MockUpdate(void)
 {
     if (!s_open) return;
 
-    uint32_t elapsed = HAL_GetTick() - s_start_tick;
+    uint32_t now = HAL_GetTick();
 
-    while (s_next_valid && elapsed >= s_next_rel_ms) {
+    while (s_next_valid && (int32_t)(now - s_next_play_at) >= 0) {
+        uint32_t scheduled_at = s_next_play_at;
+
         s_curr        = s_next;
-        s_curr_rel_ms = s_next_rel_ms;
+        s_curr_csv_ts = s_next_csv_ts;
 
         FS_GNSS_InjectData(&s_curr);
 
-        s_next_valid = s_eof ? false : ReadNext(&s_next_rel_ms, &s_next);
-        elapsed      = HAL_GetTick() - s_start_tick;
+        uint32_t next_ts;
+        s_next_valid = s_eof ? false : ReadNext(&next_ts, &s_next);
+        if (s_next_valid) {
+            uint32_t gap   = ComputeGapMs(s_curr_csv_ts, next_ts);
+            s_next_csv_ts  = next_ts;
+            s_next_play_at = scheduled_at + gap;
+        }
+
+        now = HAL_GetTick();
     }
+
+    if (!s_next_valid && s_eof)
+        HW_TS_Stop(s_timer_id);
 }
 
 #endif /* GNSS_MOCK_ENABLED */
