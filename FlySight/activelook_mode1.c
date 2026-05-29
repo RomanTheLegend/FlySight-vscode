@@ -524,7 +524,8 @@ static void RenderCompetitionRun(const FS_GNSS_Data_t *gnss, const FS_Config_Dat
     char raw[16];
     if (gnss->gpsFix == 3 && gnss->velD > 0) {
         float gr = (float)gnss->gSpeed * 10.0f / (float)gnss->velD;
-        snprintf(raw, sizeof(raw), "Gr: %.1f", (double)gr);
+        int gr10 = (int)(gr * 10.0f + 0.5f);
+        snprintf(raw, sizeof(raw), "Gr: %d.%d", gr10 / 10, gr10 % 10);
     } else {
         snprintf(raw, sizeof(raw), "Gr: --");
     }
@@ -568,11 +569,14 @@ static void RenderRunScore(const FS_GNSS_Data_t *gnss, const FS_Config_Data_t *c
 
     char raw[AL_TEXTFIELD_MAXLEN];
     if (s_score_valid) {
-        snprintf(raw, sizeof(raw), "T: %.1fs", (double)s_score_time_s);
+        { int v = (int)(s_score_time_s * 10.0f + 0.5f);
+          snprintf(raw, sizeof(raw), "T: %d.%ds", v / 10, v % 10); }
         AL_Draw_TextField(&tf_time, TIME_FONT, raw);
-        snprintf(raw, sizeof(raw), "S: %.1f",  (double)s_score_speed_kmh);
+        { int v = (int)(s_score_speed_kmh * 10.0f + 0.5f);
+          snprintf(raw, sizeof(raw), "S: %d.%dkm/h", v / 10, v % 10); }
         AL_Draw_TextField(&tf_spd,  SPD_FONT,  raw);
-        snprintf(raw, sizeof(raw), "D: %.1fm", (double)s_score_dist_m);
+        { int v = (int)(s_score_dist_m * 10.0f + 0.5f);
+          snprintf(raw, sizeof(raw), "D: %d.%dm", v / 10, v % 10); }
         AL_Draw_TextField(&tf_dist, DIST_FONT, raw);
     } else {
         AL_Draw_TextField(&tf_time, TIME_FONT, "T: --");
@@ -649,7 +653,7 @@ void FS_ActiveLook_Mode1_Init(void)
     s_lane_start_lat = 0;
     s_lane_start_lon = 0;
     s_lane_ext_lat   = 0;
-    s_lane_ext_lon   = 0
+    s_lane_ext_lon   = 0;
 
     s_lane_start_lat  = 0;
     s_lane_start_lon  = 0;
