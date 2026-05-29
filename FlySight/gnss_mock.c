@@ -2,21 +2,21 @@
 **  FlySight 2 firmware — GPS mock for SD-card replay                     **
 **  Copyright 2025 Bionic Avionics Inc.  (GPL-3.0-or-later)              **
 **                                                                        **
-**  CSV column layout (row 1 = header, row 2 = units, row 3+ = data):   **
-**    0  time     ISO 8601  "2026-05-24T08:35:58.74Z"                    **
-**    1  lat      degrees                                                 **
-**    2  lon      degrees                                                 **
-**    3  hMSL     metres                                                  **
-**    4  velN     m/s                                                     **
-**    5  velE     m/s                                                     **
-**    6  velD     m/s                                                     **
-**    7  hAcc     metres                                                  **
-**    8  vAcc     metres                                                  **
-**    9  sAcc     m/s                                                     **
-**   10  gpsFix   integer (3 = 3-D fix)                                  **
-**   11  numSV    integer                                                 **
-**   12  heading  degrees                                                 **
-**   13  headAcc  degrees  (ignored)                                      **
+**  Supported CSV formats                                                  **
+**                                                                        **
+**  Format A — plain CSV (legacy MOCK.CSV):                               **
+**    Row 1 = column names, row 2 = units, rows 3+ = data                 **
+**    Columns: time,lat,lon,hMSL,velN,velE,velD,hAcc,vAcc,sAcc,          **
+**             gpsFix,numSV,heading,headAcc                               **
+**                                                                        **
+**  Format B — FlySight 2 track log ($GNSS rows):                         **
+**    Header lines start with '$' (not '$GNSS,') and are skipped.         **
+**    Data lines: $GNSS,time,lat,lon,hMSL,velN,velE,velD,                 **
+**                hAcc,vAcc,sAcc,numSV                                    **
+**    gpsFix is assumed 3 (3-D fix); heading defaults to 0.               **
+**                                                                        **
+**  The format is detected per-row: '$GNSS,' prefix → Format B,          **
+**  first char is a digit → Format A data row, else skipped.             **
 ****************************************************************************/
 
 #include "gnss_mock.h"
@@ -34,12 +34,12 @@
 
 /* ---- Constants ----------------------------------------------------------- */
 
-#define MOCK_FILE_PATH   "MOCK.CSV"
-#define MOCK_TIMER_MS    200u
-#define MOCK_TIMER_RATE  (MOCK_TIMER_MS * 1000u / CFG_TS_TICK_VAL)
-#define MOCK_LINE_LEN    220
-#define MOCK_MAX_GAP_MS  5000u   /* gaps wider than this are compressed */
-#define MOCK_POST_GAP_MS  500u   /* playback delay used for a compressed gap */
+#define MOCK_FILE_PATH    "MOCK.CSV"
+#define MOCK_TIMER_MS     200u
+#define MOCK_TIMER_RATE   (MOCK_TIMER_MS * 1000u / CFG_TS_TICK_VAL)
+#define MOCK_LINE_LEN     220
+#define MOCK_MAX_GAP_MS   5000u   /* gaps wider than this are compressed */
+#define MOCK_POST_GAP_MS   500u   /* playback delay used for a compressed gap */
 
 /* ---- Static state -------------------------------------------------------- */
 
@@ -61,7 +61,6 @@ static uint8_t s_timer_id;
 
 /*
  * Parse "YYYY-MM-DDTHH:MM:SS[.frac]Z" → milliseconds from midnight.
- * Only the time portion (after 'T') is used.
  */
 static uint32_t ParseTimestampMs(const char *ts)
 {
@@ -94,11 +93,6 @@ static uint32_t ParseTimestampMs(const char *ts)
 
 /* ---- Gap computation ------------------------------------------------------ */
 
-/*
- * Compute the playback delay between two consecutive CSV timestamps.
- * Handles midnight wrap.  Gaps wider than MOCK_MAX_GAP_MS are compressed
- * to MOCK_POST_GAP_MS.
- */
 static uint32_t ComputeGapMs(uint32_t from_ts, uint32_t to_ts)
 {
     uint32_t delta = (to_ts >= from_ts)
@@ -114,17 +108,27 @@ static uint32_t ComputeGapMs(uint32_t from_ts, uint32_t to_ts)
 /* ---- CSV row parser ------------------------------------------------------- */
 
 /*
- * Parse one comma-separated data row into *d.
+ * Parse one data row.  buf is modified in-place (strtok).
+ * Detects format by checking for '$GNSS,' prefix.
  * Returns the raw ms-from-midnight timestamp in *csv_ts_out.
- * buf is modified in-place (strtok).
  */
 static bool ParseRow(char *buf, uint32_t *csv_ts_out, FS_GNSS_Data_t *d)
 {
-    char *tok;
+    char *p = buf;
+    bool  fmt_b = false;
+
+    if (strncmp(p, "$GNSS,", 6) == 0) {
+        fmt_b = true;
+        p += 6;
+    } else if (*p < '0' || *p > '9') {
+        return false;   /* not a data row */
+    }
 
     memset(d, 0, sizeof(*d));
 
-    tok = strtok(buf, ","); if (!tok) return false;
+    char *tok;
+
+    tok = strtok(p, ","); if (!tok) return false;
     *csv_ts_out = ParseTimestampMs(tok);
 
     tok = strtok(NULL, ","); if (!tok) return false;
@@ -160,22 +164,29 @@ static bool ParseRow(char *buf, uint32_t *csv_ts_out, FS_GNSS_Data_t *d)
     tok = strtok(NULL, ","); if (!tok) return false;
     d->sAcc = (uint32_t)(atof(tok) * 1000.0);
 
-    tok = strtok(NULL, ","); if (!tok) return false;
-    d->gpsFix = (uint8_t)atoi(tok);
+    if (fmt_b) {
+        /* Format B: last field is numSV; gpsFix = 3, heading = 0 */
+        tok = strtok(NULL, ","); if (!tok) return false;
+        d->numSV  = (uint8_t)atoi(tok);
+        d->gpsFix = 3;
+    } else {
+        /* Format A: gpsFix, numSV, heading, headAcc */
+        tok = strtok(NULL, ","); if (!tok) return false;
+        d->gpsFix = (uint8_t)atoi(tok);
 
-    tok = strtok(NULL, ","); if (!tok) return false;
-    d->numSV = (uint8_t)atoi(tok);
+        tok = strtok(NULL, ","); if (!tok) return false;
+        d->numSV = (uint8_t)atoi(tok);
 
-    tok = strtok(NULL, ","); if (!tok) return false;
-    d->heading = (int32_t)(atof(tok) * 1e5);
-
-    /* col 13: headAcc — skip */
+        tok = strtok(NULL, ","); if (!tok) return false;
+        d->heading = (int32_t)(atof(tok) * 1e5);
+        /* headAcc: skip */
+    }
 
     d->iTOW = *csv_ts_out;
     return true;
 }
 
-/* Read and parse the next non-empty data line from s_file. */
+/* Read and parse the next data line, skipping non-data lines. */
 static bool ReadNext(uint32_t *csv_ts, FS_GNSS_Data_t *d)
 {
     static char buf[MOCK_LINE_LEN];
@@ -200,27 +211,14 @@ static void MockUpdate(void);
 
 void FS_GNSS_Mock_Init(void)
 {
-    char buf[MOCK_LINE_LEN];
-
     if (f_open(&s_file, MOCK_FILE_PATH, FA_READ) != FR_OK) return;
     s_open = true;
     s_eof  = false;
 
-    /* Skip header row 1 (column names) and row 2 (units) */
-    f_gets(buf, sizeof(buf), &s_file);
-    f_gets(buf, sizeof(buf), &s_file);
+    /* ReadNext skips all header/meta lines in both formats */
+    if (!ReadNext(&s_curr_csv_ts, &s_curr)) goto fail;
 
-    /* Read and parse the first data row */
-    if (!f_gets(buf, sizeof(buf), &s_file)) goto fail;
-    buf[strcspn(buf, "\r\n")] = '\0';
-
-    {
-        uint32_t first_ts;
-        if (!ParseRow(buf, &first_ts, &s_curr)) goto fail;
-        s_curr_csv_ts = first_ts;
-    }
-
-    /* Pre-load the look-ahead record and schedule when to fire it */
+    /* Pre-load look-ahead and schedule its fire time */
     s_next_valid = ReadNext(&s_next_csv_ts, &s_next);
     if (s_next_valid) {
         uint32_t gap = ComputeGapMs(s_curr_csv_ts, s_next_csv_ts);
@@ -260,8 +258,8 @@ static void MockTimer(void)
 /*
  * Called from the sequencer every MOCK_TIMER_MS ms.
  * Advances playback whenever wall-clock time has reached the scheduled
- * fire time for the next record.  Timestamp gaps wider than
- * MOCK_MAX_GAP_MS are compressed to MOCK_POST_GAP_MS.
+ * fire time for the next record.  Gaps wider than MOCK_MAX_GAP_MS are
+ * compressed to MOCK_POST_GAP_MS.
  */
 static void MockUpdate(void)
 {
