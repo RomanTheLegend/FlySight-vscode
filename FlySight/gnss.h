@@ -25,6 +25,7 @@
 #define GNSS_H_
 
 #include <stdbool.h>
+#include "gnss_mock.h"
 
 #define GNSS_RX_BUF_LEN   2048  // Circular buffer for UART
 #define GNSS_RAW_BUF_LEN  512   // Circular buffer for raw output
@@ -88,6 +89,12 @@ void FS_GNSS_Stop(void);
 
 const FS_GNSS_Data_t *FS_GNSS_GetData(void);
 void FS_GNSS_DataReady_SetCallback(void (*callback)(void));
+
+#if GNSS_MOCK_ENABLED
+/* Copy *data into the shared GNSS buffer and fire the data-ready callback.
+ * Called exclusively by gnss_mock.c. */
+void FS_GNSS_InjectData(const FS_GNSS_Data_t *data);
+#endif
 
 void FS_GNSS_Timepulse(void);
 const FS_GNSS_Time_t *FS_GNSS_GetTime(void);

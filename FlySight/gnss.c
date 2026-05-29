@@ -25,6 +25,7 @@
 #include "app_common.h"
 #include "config.h"
 #include "gnss.h"
+#include "gnss_mock.h"
 #include "log.h"
 #include "sensor_time.h"
 #include "state.h"
@@ -848,6 +849,14 @@ static void FS_GNSS_InitMessages(void)
 
 void FS_GNSS_Init(void)
 {
+#if GNSS_MOCK_ENABLED
+	gnssTimeOfWeek  = 0;
+	gnssMsgReceived = 0;
+	validTime       = false;
+	FS_GNSS_Mock_Init();
+	return;
+#endif
+
 	const ubxCfgPrt_t cfgPrt =
 	{
 		.portID       = 1,         // UART 1
@@ -935,6 +944,11 @@ void FS_GNSS_Init(void)
 
 void FS_GNSS_DeInit(void)
 {
+#if GNSS_MOCK_ENABLED
+	FS_GNSS_Mock_DeInit();
+	return;
+#endif
+
 	// Stop DMA transfer
 	HAL_UART_DMAStop(&huart1);
 
@@ -952,6 +966,10 @@ void FS_GNSS_DeInit(void)
 
 void FS_GNSS_Start(void)
 {
+#if GNSS_MOCK_ENABLED
+	return;  /* mock already running from FS_GNSS_Init */
+#endif
+
 	// Enable EXTI pin
 	LL_EXTI_EnableIT_0_31(LL_EXTI_LINE_3);
 
@@ -977,6 +995,10 @@ void FS_GNSS_Start(void)
 
 void FS_GNSS_Stop(void)
 {
+#if GNSS_MOCK_ENABLED
+	return;
+#endif
+
 	const ubxCfgRst_t cfgRst =
 	{
 		.navBbrMask = 0x0000,   // Hot start
@@ -1039,6 +1061,15 @@ const FS_GNSS_Data_t *FS_GNSS_GetData(void)
 {
 	return &gnssData;
 }
+
+#if GNSS_MOCK_ENABLED
+void FS_GNSS_InjectData(const FS_GNSS_Data_t *data)
+{
+	gnssData = *data;
+	if (data_ready_callback)
+		data_ready_callback();
+}
+#endif
 
 void FS_GNSS_Timepulse(void)
 {
