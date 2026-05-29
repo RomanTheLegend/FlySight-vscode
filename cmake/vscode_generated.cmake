@@ -82,6 +82,7 @@ target_sources(${BUILD_UNIT_0_NAME} PRIVATE
     "FlySight/device_state.c"
     "FlySight/flight_params.c"
     "FlySight/gnss.c"
+    "FlySight/gnss_mock.c"
     "FlySight/gnss_ble.c"
     "FlySight/hts221.c"
     "FlySight/hum.c"

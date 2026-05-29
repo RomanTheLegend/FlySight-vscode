@@ -105,7 +105,7 @@
 #define CANOPY_VELDOWN_MS           10.0f   /* m/s  — FREEFALL→CANOPY threshold */
 #define COMP_SCORE_ALT_A_M          2500    /* AGL for point A capture */
 #define COMP_SCORE_ALT_B_M          1500    /* AGL for point B capture; also phase exit */
-#define RUN_SCORE_HOLD_MS          15000    /* ms in RUN_SCORE before HOME_NAV */
+#define RUN_SCORE_DISPLAY_DURATION_MS          15000    /* ms in RUN_SCORE before HOME_NAV */
 #define HOME_NAV_EXIT_VELDOWN_MS     3.0f   /* avg velD below this → IDLE (landed) */
 #define HOME_NAV_RING_SIZE            10    /* GNSS samples in velD averaging window */
 
@@ -401,19 +401,25 @@ static void OnPhaseEnter(void)
 static void RenderIdle(const FS_GNSS_Data_t *gnss, const FS_Config_Data_t *cfg)
 {
     enum {
-        ALT_X = 25,   ALT_Y = 95,  ALT_FONT = 2,   /* altitude above MSL */
-        DZ_X  = 25,   DZ_Y  = 60,  DZ_FONT  = 2,   /* declared DZ elevation */
-        LBL_X = 55, LBL_Y = 130, LBL_FONT = 1,   /* "Run target" arrow label */
-        ARROW_LX = 100, ARROW_LY = 90,
+        ALT_X = 25,   ALT_Y = 130,  ALT_FONT = 3,   /* altitude above MSL */
+        HMLS_X = 25,   HMSL_Y = 83,  HMSL_FONT = 1,   /* altitude above MSL */
+        DZ_X  = 25,   DZ_Y  = 60,  DZ_FONT  = 1,   /* declared DZ elevation */
+        LBL_X = 55, LBL_Y = 155, LBL_FONT = 1,   /* "Run target" arrow label */
+        ARROW_LX = 100, ARROW_LY = 70,
     };
     static AL_TextField_t tf_alt   = AL_TEXTFIELD_INIT(AL_TX(ALT_X), ALT_Y);
+    static AL_TextField_t tf_hmsl   = AL_TEXTFIELD_INIT(AL_TX(HMLS_X), HMSL_Y);
     static AL_TextField_t tf_dz    = AL_TEXTFIELD_INIT(AL_TX(DZ_X),  DZ_Y);
     static AL_TextField_t tf_label = AL_TEXTFIELD_INIT(AL_TX(LBL_X), LBL_Y);
 
     char raw[16];
+    if (gnss->gpsFix == 3) snprintf(raw, sizeof(raw), "Alt: %ldm", (long)((gnss->hMSL - cfg->dz_elev) / 1000));
+    else                   snprintf(raw, sizeof(raw), "Alt: --");
+    AL_Draw_TextField(&tf_alt, ALT_FONT, raw);
+
     if (gnss->gpsFix == 3) snprintf(raw, sizeof(raw), "hMSL: %ldm", (long)(gnss->hMSL / 1000));
     else                   snprintf(raw, sizeof(raw), "hMSL: --");
-    AL_Draw_TextField(&tf_alt, ALT_FONT, raw);
+    AL_Draw_TextField(&tf_hmsl, HMSL_FONT, raw);
 
     snprintf(raw, sizeof(raw), "DZ e: %ldm", (long)(cfg->dz_elev / 1000));
     AL_Draw_TextField(&tf_dz, DZ_FONT, raw);
@@ -643,8 +649,7 @@ void FS_ActiveLook_Mode1_Init(void)
     s_lane_start_lat = 0;
     s_lane_start_lon = 0;
     s_lane_ext_lat   = 0;
-    s_lane_ext_lon   = 0;
-
+    s_lane_ext_lon   = 0
 
     s_lane_start_lat  = 0;
     s_lane_start_lon  = 0;
@@ -801,7 +806,7 @@ void FS_ActiveLook_Mode1_Update(void)
 
     /* ---- RUN_SCORE --------------------------------------------------- */
     case COMP_PHASE_RUN_SCORE:
-        if ((gnss->iTOW - s_run_score_itow) >= RUN_SCORE_HOLD_MS)
+        if ((gnss->iTOW - s_run_score_itow) >= RUN_SCORE_DISPLAY_DURATION_MS)
             s_phase = COMP_PHASE_HOME_NAV;
         break;
 
