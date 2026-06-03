@@ -192,11 +192,12 @@ static int32_t             s_pt_b_lat        = 0;
 static int32_t             s_pt_b_lon        = 0;
 static uint32_t            s_pt_b_itow       = 0;
 
-/* Previous GNSS sample — needed for closest-crossing logic */
+/* Previous GNSS sample — needed for crossing interpolation */
 static int32_t             s_prev_lat        = 0;
 static int32_t             s_prev_lon        = 0;
 static uint32_t            s_prev_itow       = 0;
 static int32_t             s_prev_alt_agl_m  = 0;
+static int32_t             s_prev_hMSL       = 0;   /* mm — full precision for interp */
 
 /* Score results */
 static float               s_score_time_s    = 0.0f;
@@ -741,6 +742,7 @@ void FS_ActiveLook_Mode1_Update(void)
             s_pt_b_valid     = false;
             s_score_valid    = false;
             s_prev_alt_agl_m = alt_agl_m;
+            s_prev_hMSL      = gnss->hMSL;
             s_prev_lat       = gnss->lat;
             s_prev_lon       = gnss->lon;
             s_prev_itow      = gnss->iTOW;
@@ -752,40 +754,39 @@ void FS_ActiveLook_Mode1_Update(void)
     /* ---- COMPETITION_RUN --------------------------------------------- */
     case COMP_PHASE_COMPETITION_RUN:
         if (has_gps) {
-            /* ---- Score capture: closest sample to 2500 m AGL (point A) */
+            /* ---- Score capture: interpolated position at 2500 m AGL (point A) */
             if (!s_pt_a_valid &&
                 s_prev_alt_agl_m >= COMP_SCORE_ALT_A_M && alt_agl_m < COMP_SCORE_ALT_A_M)
             {
-                int32_t d_prev = s_prev_alt_agl_m - COMP_SCORE_ALT_A_M;
-                int32_t d_curr = COMP_SCORE_ALT_A_M - alt_agl_m;
-                if (d_prev <= d_curr) {
-                    s_pt_a_lat = s_prev_lat; s_pt_a_lon = s_prev_lon;
-                    s_pt_a_itow = s_prev_itow;
-                } else {
-                    s_pt_a_lat = gnss->lat;  s_pt_a_lon = gnss->lon;
-                    s_pt_a_itow = gnss->iTOW;
-                }
+                int32_t target_hMSL = COMP_SCORE_ALT_A_M * 1000 + cfg->dz_elev;
+                float span = (float)(s_prev_hMSL - gnss->hMSL);
+                float t    = (span > 0.0f)
+                           ? (float)(s_prev_hMSL - target_hMSL) / span
+                           : 0.0f;
+                s_pt_a_lat  = s_prev_lat  + (int32_t)(t * (float)(gnss->lat  - s_prev_lat));
+                s_pt_a_lon  = s_prev_lon  + (int32_t)(t * (float)(gnss->lon  - s_prev_lon));
+                s_pt_a_itow = s_prev_itow + (uint32_t)(t * (float)(gnss->iTOW - s_prev_itow));
                 s_pt_a_valid = true;
             }
 
-            /* ---- Score capture: closest sample to 1500 m AGL (point B) */
+            /* ---- Score capture: interpolated position at 1500 m AGL (point B) */
             if (s_pt_a_valid && !s_pt_b_valid &&
                 s_prev_alt_agl_m >= COMP_SCORE_ALT_B_M && alt_agl_m < COMP_SCORE_ALT_B_M)
             {
-                int32_t d_prev = s_prev_alt_agl_m - COMP_SCORE_ALT_B_M;
-                int32_t d_curr = COMP_SCORE_ALT_B_M - alt_agl_m;
-                if (d_prev <= d_curr) {
-                    s_pt_b_lat = s_prev_lat; s_pt_b_lon = s_prev_lon;
-                    s_pt_b_itow = s_prev_itow;
-                } else {
-                    s_pt_b_lat = gnss->lat;  s_pt_b_lon = gnss->lon;
-                    s_pt_b_itow = gnss->iTOW;
-                }
+                int32_t target_hMSL = COMP_SCORE_ALT_B_M * 1000 + cfg->dz_elev;
+                float span = (float)(s_prev_hMSL - gnss->hMSL);
+                float t    = (span > 0.0f)
+                           ? (float)(s_prev_hMSL - target_hMSL) / span
+                           : 0.0f;
+                s_pt_b_lat  = s_prev_lat  + (int32_t)(t * (float)(gnss->lat  - s_prev_lat));
+                s_pt_b_lon  = s_prev_lon  + (int32_t)(t * (float)(gnss->lon  - s_prev_lon));
+                s_pt_b_itow = s_prev_itow + (uint32_t)(t * (float)(gnss->iTOW - s_prev_itow));
                 s_pt_b_valid = true;
             }
 
             /* Update previous sample */
             s_prev_alt_agl_m = alt_agl_m;
+            s_prev_hMSL = gnss->hMSL;
             s_prev_lat  = gnss->lat;
             s_prev_lon  = gnss->lon;
             s_prev_itow = gnss->iTOW;
