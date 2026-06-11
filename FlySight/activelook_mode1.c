@@ -101,7 +101,7 @@
 
 #define AIRPLANE_ENTER_AGL_M         100    /* IDLE → AIRPLANE (m AGL) */
 #define AIRPLANE_EXIT_AGL_M           50    /* AIRPLANE → IDLE if altitude lost */
-#define FREEFALL_LOCK_TIME_MS      10000    /* ms after freefall → COMPETITION_RUN */
+#define FREEFALL_LOCK_TIME_MS       9000    /* ms after freefall → COMPETITION_RUN */
 #define CANOPY_VELDOWN_MS           10.0f   /* m/s  — FREEFALL→CANOPY threshold */
 #define COMP_SCORE_ALT_A_M          2500    /* AGL for point A capture */
 #define COMP_SCORE_ALT_B_M          1500    /* AGL for point B capture; also phase exit */
@@ -460,7 +460,7 @@ static void RenderAirplane(const FS_GNSS_Data_t *gnss, const FS_Config_Data_t *c
     else                   snprintf(raw, sizeof(raw), "--");
     AL_Draw_TextField(&tf_alt, ALT_FONT, raw);
 
-    if (gnss->gpsFix == 3) snprintf(raw, sizeof(raw), "Vh : %d", (int)((float)gnss->gSpeed * 0.036f));
+    if (gnss->gpsFix == 3) snprintf(raw, sizeof(raw), "Vh: %d", (int)((float)gnss->gSpeed * 0.036f));
     else                   snprintf(raw, sizeof(raw), "--");
     AL_Draw_TextField(&tf_hs, HS_FONT, raw);
 
@@ -470,7 +470,7 @@ static void RenderAirplane(const FS_GNSS_Data_t *gnss, const FS_Config_Data_t *c
         float angle = RelativeBearing(gnss->lat, gnss->lon,
                                        cfg->al_target_lat, cfg->al_target_lon,
                                        gnss->heading);
-        AL_Arrow_Draw(&s_target_arrow, ARROW_LX, ARROW_LY, angle);
+        AL_CompassArrow_Draw(&s_target_arrow, ARROW_LX, ARROW_LY, angle);
         AL_Draw_TextField(&tf_label, LBL_FONT, "Run target");
     } else {
         AL_Draw_TextField(&tf_label, LBL_FONT, "");
@@ -492,7 +492,7 @@ static void RenderFreefall(const FS_GNSS_Data_t *gnss, const FS_Config_Data_t *c
     AL_Draw_TextField(&tf_label, LBL_FONT, "Lane lock in");
 
     uint32_t elapsed_ms = gnss->iTOW - s_freefall_itow;
-    int countdown = 10 - (int)(elapsed_ms / 1000);
+    int countdown = (int)(FREEFALL_LOCK_TIME_MS/1000) - (int)(elapsed_ms / 1000);
     if (countdown < 0) countdown = 0;
 
     char raw[4];
