@@ -45,6 +45,7 @@
 #include "common.h"
 #include "state.h"
 #include "activelook_client.h"
+#include "activelook.h"
 #include "config.h"
 /* USER CODE END Includes */
 
@@ -500,6 +501,7 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
         APP_DBG_MSG("\r\n\r** DISCONNECTION EVENT OF END DEVICE 1 \n\r");
         BleApplicationContext.EndDevice_Connection_Status[0] = APP_BLE_IDLE;
         BleApplicationContext.connectionHandleEndDevice1 = 0xFFFF;
+        FS_ActiveLook_HandleDisconnect();
       }
 
       if (p_disconnection_complete_event->Connection_Handle == BleApplicationContext.connectionHandleCentral)
@@ -760,6 +762,13 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
               {
                 APP_DBG_MSG("-- Setting task CFG_TASK_CONN_DEV_1_ID\n\r");
                 UTIL_SEQ_SetTask(1 << CFG_TASK_CONN_DEV_1_ID, CFG_SCH_PRIO_0);
+              }
+              else if (BleApplicationContext.EndDevice_Connection_Status[0] != APP_BLE_CONNECTED
+                       && FS_Config_Get()->al_mode != 0)
+              {
+                /* Device not found this scan window — retry until it comes back */
+                APP_DBG_MSG("-- ActiveLook device not found, retrying scan\n\r");
+                UTIL_SEQ_SetTask(1 << CFG_TASK_START_SCAN_ID, CFG_SCH_PRIO_0);
               }
 #if (CFG_P2P_DEMO_MULTI != 0)
               /* USER CODE BEGIN EVT_BLUE_GAP_PROCEDURE_COMPLETE_Multi */
