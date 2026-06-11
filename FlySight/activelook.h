@@ -31,5 +31,6 @@ typedef enum {
 
 void FS_ActiveLook_Init(void);
 void FS_ActiveLook_DeInit(void);
+void FS_ActiveLook_HandleDisconnect(void);
 
 #endif /* ACTIVELOOK_H_ */

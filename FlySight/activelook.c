@@ -1,6 +1,7 @@
 #include "main.h"
 #include "activelook.h"
 #include "activelook_client.h"
+#include "activelook_draw.h"
 #include "activelook_mode0.h"
 #include "activelook_mode1.h"
 #include "app_common.h"
@@ -227,17 +228,12 @@ static void FS_ActiveLook_Task(void)
 
     case AL_STATE_CLEAR:
     {
-        /* Example "clear" packet:
-         * 0xFF 0x35 0x00 0x05  0xAA
-         * Adjust if your firmware uses a different ID. */
-        uint8_t packet[5];
-        packet[0] = 0xFF;  // start
-        packet[1] = 0x01;  // "clear" command ID
-        packet[2] = 0x00;  // format
-        packet[3] = 5;     // total length
-        packet[4] = 0xAA;  // footer
+        /* AL_Draw_ClearScreen sends the BLE clear command AND increments
+         * s_screen_gen, which invalidates all cached text fields so that
+         * static strings (e.g. "DZ e:", "Run target") are redrawn on the
+         * next render pass even when their content hasn't changed. */
         APP_DBG_MSG("ActiveLook: Clearing display...\n");
-        FS_ActiveLook_Client_WriteWithoutResp(packet, sizeof(packet));
+        AL_Draw_ClearScreen();
 
         /* Now go idle. Wait for FS_ActiveLook_GNSS_Update to set us to "update" */
         s_state = AL_STATE_READY;
@@ -300,4 +296,14 @@ void FS_ActiveLook_DeInit(void)
 
     /* Disconnect from the device if desired */
     UTIL_SEQ_SetTask(1 << CFG_TASK_DISCONN_DEV_1_ID, CFG_SCH_PRIO_0);
+}
+
+/* Called when the ActiveLook device disconnects unexpectedly (e.g. low battery).
+ * Resets the state machine and restarts scanning so the device can reconnect
+ * without requiring a FlySight power cycle. */
+void FS_ActiveLook_HandleDisconnect(void)
+{
+    s_state = AL_STATE_INIT;
+    HW_TS_Stop(timer_id);
+    UTIL_SEQ_SetTask(1 << CFG_TASK_START_SCAN_ID, CFG_SCH_PRIO_0);
 }
