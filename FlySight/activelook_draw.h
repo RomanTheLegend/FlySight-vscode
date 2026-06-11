@@ -138,4 +138,12 @@ void AL_Arrow_DrawWithLabel(AL_ArrowState_t *state, int lx, int ly, float angle_
                              uint16_t label_raw_x, uint16_t label_raw_y,
                              uint8_t label_font, const char *label);
 
+/*
+ * Draw a compass-style double-sided arrow centred at logical (lx, ly).
+ * The north (forward) half is solid-filled; the south half is an outline only.
+ * angle_deg = 0 → north tip points to physical top of display.
+ * Same state struct and AL_Arrow_Erase() as AL_Arrow_Draw.
+ */
+void AL_CompassArrow_Draw(AL_ArrowState_t *state, int lx, int ly, float angle_deg);
+
 #endif /* ACTIVELOOK_DRAW_H */

@@ -107,9 +107,9 @@ void AL_Arrow_Erase(AL_ArrowState_t *state)
         return;
 
     /* Erase by painting a filled black circle over the arrow center, then
-     * restoring white.  Radius = half arrow height: (5m+7m)/2 = 6m = 21 px.
+     * restoring white.  r = 32 covers the compass arrow tips at 8m = 28 px.
      * color cmd 0x30, circf cmd 0x36 (s16 x, s16 y, u8 r): 6+10+6 = 22 bytes */
-    const uint8_t r = 26;
+    const uint8_t r = 32;
     uint8_t buf[22];
     uint16_t pos = 0;
 
@@ -145,30 +145,91 @@ void AL_Arrow_Draw(AL_ArrowState_t *state, int lx, int ly, float angle_deg)
         float lyv = (float)ly + vx[i] * sin_r + vy[i] * cos_r;
         rx[i] = (int16_t)(AL_DISPLAY_WIDTH  - (int16_t)lxv);
         ry[i] = (int16_t)(AL_DISPLAY_HEIGHT - (int16_t)lyv);
+        state->prev_rx[i] = rx[i];
+        state->prev_ry[i] = ry[i];
     }
 
     state->cx = (int16_t)(AL_DISPLAY_WIDTH  - lx);
     state->cy = (int16_t)(AL_DISPLAY_HEIGHT - ly);
 
-    /* Bundle all 7 DrawLine commands into one BLE write (7*13 = 91 bytes)
-     * so the display IC receives them in a single packet. */
-    uint8_t buf[91];
+    /* polyline cmd 0x38: 8 points (7 vertices + v[0] repeated to close polygon)
+     * data = 3 (thickness+res+res) + 8*4 = 35 B; total frame = 4+35+1 = 40 B */
+    uint8_t buf[40];
     uint16_t pos = 0;
-    for (int i = 0; i < 7; i++) {
-        int     next = (i + 1) % 7;
-        int16_t x1   = rx[i],    y1 = ry[i];
-        int16_t x2   = rx[next], y2 = ry[next];
-        buf[pos++] = 0xFF; buf[pos++] = 0x32; buf[pos++] = 0x00; buf[pos++] = 13;
-        buf[pos++] = (uint8_t)((uint16_t)x1 >> 8); buf[pos++] = (uint8_t)(x1 & 0xFF);
-        buf[pos++] = (uint8_t)((uint16_t)y1 >> 8); buf[pos++] = (uint8_t)(y1 & 0xFF);
-        buf[pos++] = (uint8_t)((uint16_t)x2 >> 8); buf[pos++] = (uint8_t)(x2 & 0xFF);
-        buf[pos++] = (uint8_t)((uint16_t)y2 >> 8); buf[pos++] = (uint8_t)(y2 & 0xFF);
-        buf[pos++] = 0xAA;
-        state->prev_rx[i] = rx[i];
-        state->prev_ry[i] = ry[i];
+    buf[pos++] = 0xFF; buf[pos++] = 0x38; buf[pos++] = 0x00; buf[pos++] = 40;
+    buf[pos++] = 1;    buf[pos++] = 0;    buf[pos++] = 0;
+    for (int i = 0; i <= 7; i++) {
+        int j = i % 7;
+        buf[pos++] = (uint8_t)((uint16_t)rx[j] >> 8); buf[pos++] = (uint8_t)(rx[j] & 0xFF);
+        buf[pos++] = (uint8_t)((uint16_t)ry[j] >> 8); buf[pos++] = (uint8_t)(ry[j] & 0xFF);
     }
+    buf[pos++] = 0xAA;
     FS_ActiveLook_Client_WriteWithoutResp(buf, pos);
     state->valid = true;
+}
+
+/* Draw a compass-style double-sided arrow: filled top half, outlined bottom half.
+ * Same coordinate convention as AL_Arrow_Draw; uses the same state/erase. */
+void AL_CompassArrow_Draw(AL_ArrowState_t *state, int lx, int ly, float angle_deg)
+{
+    const float m = 3.5f;
+    const float H = 8.0f * m;   /* center-to-tip distance: 28.0 px */
+    const float W = 2.5f * m;   /* center-to-wing distance:  8.75 px */
+    const int   NFILL = 14;     /* scan lines at local-y = 0, 2, 4, ..., 26 */
+
+    float rad   = angle_deg * (float)M_PI / 180.0f;
+    float cos_r = cosf(rad);
+    float sin_r = sinf(rad);
+
+#define _CRX(xl, yl) ((int16_t)(AL_DISPLAY_WIDTH  - ((float)(lx) + (xl)*cos_r - (yl)*sin_r)))
+#define _CRY(xl, yl) ((int16_t)(AL_DISPLAY_HEIGHT - ((float)(ly) + (xl)*sin_r + (yl)*cos_r)))
+#define _WLINE(x1, y1, x2, y2) do {                                           \
+        int16_t _a=(x1),_b=(y1),_c=(x2),_d=(y2);                              \
+        buf[pos++]=0xFF; buf[pos++]=0x32; buf[pos++]=0x00; buf[pos++]=13;      \
+        buf[pos++]=(uint8_t)((uint16_t)_a>>8); buf[pos++]=(uint8_t)(_a&0xFF); \
+        buf[pos++]=(uint8_t)((uint16_t)_b>>8); buf[pos++]=(uint8_t)(_b&0xFF); \
+        buf[pos++]=(uint8_t)((uint16_t)_c>>8); buf[pos++]=(uint8_t)(_c&0xFF); \
+        buf[pos++]=(uint8_t)((uint16_t)_d>>8); buf[pos++]=(uint8_t)(_d&0xFF); \
+        buf[pos++]=0xAA;                                                       \
+    } while(0)
+
+    /* 14 fill scan lines + 2 top outline + 2 bottom outline = 18 line commands */
+    uint8_t buf[(NFILL + 4) * 13];
+    uint16_t pos = 0;
+
+    /* Fill the top (north) half with scan lines in local space.
+     * Each line goes from the left to right edge of the triangle at that height.
+     * Rotation is applied per-endpoint so the fill works at any heading. */
+    for (int k = 0; k < NFILL; k++) {
+        float y_l  = (float)(k * 2);
+        float half = W * (1.0f - y_l / H);
+        _WLINE(_CRX(-half, y_l), _CRY(-half, y_l),
+               _CRX( half, y_l), _CRY( half, y_l));
+    }
+
+    /* Key vertices in raw display coordinates */
+    int16_t top_x = _CRX(0,  H), top_y = _CRY(0,  H);
+    int16_t lft_x = _CRX(-W, 0), lft_y = _CRY(-W, 0);
+    int16_t rgt_x = _CRX( W, 0), rgt_y = _CRY( W, 0);
+    int16_t bot_x = _CRX(0, -H), bot_y = _CRY(0, -H);
+
+    /* Top half outline */
+    _WLINE(lft_x, lft_y, top_x, top_y);
+    _WLINE(top_x, top_y, rgt_x, rgt_y);
+
+    /* Bottom (south) half outline — hollow */
+    _WLINE(lft_x, lft_y, bot_x, bot_y);
+    _WLINE(bot_x, bot_y, rgt_x, rgt_y);
+
+#undef _CRX
+#undef _CRY
+#undef _WLINE
+
+    state->cx = (int16_t)(AL_DISPLAY_WIDTH  - lx);
+    state->cy = (int16_t)(AL_DISPLAY_HEIGHT - ly);
+    state->valid = true;
+
+    FS_ActiveLook_Client_WriteWithoutResp(buf, pos);
 }
 
 void AL_Arrow_DrawWithLabel(AL_ArrowState_t *state, int lx, int ly, float angle_deg,
