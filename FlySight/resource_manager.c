@@ -139,55 +139,53 @@ static void MicroSD_DeInit(void)
 
 static FS_ResourceManager_Result_t FatFS_Init(void)
 {
-	FS_ResourceManager_Result_t ret = FS_RESOURCE_MANAGER_FAILURE;
-
-	if (resource_counts[FS_RESOURCE_FATFS] == 0)
+	if (resource_counts[FS_RESOURCE_FATFS]++ == 0)
 	{
-		/* Initialize microSD */
+		/* Initialize microSD — exclusive; fails if USB mode holds it */
 		if (FS_ResourceManager_RequestResource(FS_RESOURCE_MICROSD)
-				== FS_RESOURCE_MANAGER_SUCCESS)
+				!= FS_RESOURCE_MANAGER_SUCCESS)
 		{
-			/* Initialize FatFS */
-			if (MX_FATFS_Init() != APP_OK)
-			{
-				Error_Handler();
-			}
+			resource_counts[FS_RESOURCE_FATFS]--;
+			return FS_RESOURCE_MANAGER_FAILURE;
+		}
 
-			/* Enable microSD card */
-			if (f_mount(&fs, "0:/", 1) != FR_OK)
-			{
-				Error_Handler();
-			}
+		/* Initialize FatFS */
+		if (MX_FATFS_Init() != APP_OK)
+		{
+			Error_Handler();
+		}
 
-			++resource_counts[FS_RESOURCE_FATFS];
-
-			ret =  FS_RESOURCE_MANAGER_SUCCESS;
+		/* Enable microSD card */
+		if (f_mount(&fs, "0:/", 1) != FR_OK)
+		{
+			Error_Handler();
 		}
 	}
 
-	return ret;
+	return FS_RESOURCE_MANAGER_SUCCESS;
 }
 
 static void FatFS_DeInit(void)
 {
-	if (resource_counts[FS_RESOURCE_FATFS] == 1)
+	if (resource_counts[FS_RESOURCE_FATFS] > 0)
 	{
-		--resource_counts[FS_RESOURCE_FATFS];
-
-		/* Disable microSD card */
-		if (f_mount(0, "0:/", 0) != FR_OK)
+		if (--resource_counts[FS_RESOURCE_FATFS] == 0)
 		{
-			Error_Handler();
-		}
+			/* Disable microSD card */
+			if (f_mount(0, "0:/", 0) != FR_OK)
+			{
+				Error_Handler();
+			}
 
-		/* Disable FatFS */
-		if (MX_FATFS_DeInit() != APP_OK)
-		{
-			Error_Handler();
-		}
+			/* Disable FatFS */
+			if (MX_FATFS_DeInit() != APP_OK)
+			{
+				Error_Handler();
+			}
 
-		/* De-initialize microSD */
-		FS_ResourceManager_ReleaseResource(FS_RESOURCE_MICROSD);
+			/* De-initialize microSD */
+			FS_ResourceManager_ReleaseResource(FS_RESOURCE_MICROSD);
+		}
 	}
 	else
 	{
