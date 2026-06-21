@@ -99,6 +99,20 @@ void AL_Draw_TextField(AL_TextField_t *field, uint8_t font, const char *str)
     field->prev[AL_TEXTFIELD_MAXLEN - 1] = '\0';
 }
 
+void AL_Draw_Spaced_TextField(AL_TextField_t *field, uint8_t font, const char *str)
+{
+    char spaced[AL_TEXTFIELD_MAXLEN];
+    uint8_t si = 0;
+    for (uint8_t i = 0; str[i] != '\0' && si < AL_TEXTFIELD_MAXLEN - 1; i++) {
+        if (i > 0 && si < AL_TEXTFIELD_MAXLEN - 2)
+            spaced[si++] = ' ';
+        if (si < AL_TEXTFIELD_MAXLEN - 1)
+            spaced[si++] = str[i];
+    }
+    spaced[si] = '\0';
+    AL_Draw_TextField(field, font, spaced);
+}
+
 /* ---- Arrow drawing ------------------------------------------------------- */
 
 void AL_Arrow_Erase(AL_ArrowState_t *state)

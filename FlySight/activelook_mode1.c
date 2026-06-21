@@ -79,11 +79,18 @@
 #include "nav.h"
 #include "vbat.h"
 #include "app_common.h"
+#include "inconsolata_bold_90.h"
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <math.h>
+
+/* --------------------------------------------------------------------------
+   Custom font constants
+   -------------------------------------------------------------------------- */
+#define AL_FONT_INCONSOLATA_BOLD_90_ID   10u   /* slot 10; built-ins occupy 1-3 */
+#define AL_FONT_CHUNK_SIZE        242u   /* data bytes per fontSave frame (protocol max 242) */
 
 /* --------------------------------------------------------------------------
    Freefall detection constants  (ported from freefall.js / FlyScope)
@@ -113,9 +120,9 @@
    Lane deviation thresholds (metres cross-track)
    -------------------------------------------------------------------------- */
 
-#define LANE_MINOR_M    10.0f
-#define LANE_MODERATE_M 50.0f
-#define LANE_MAJOR_M   100.0f
+#define LANE_MINOR_M    150.0f
+#define LANE_MODERATE_M 200.0f
+#define LANE_MAJOR_M   250.0f
 
 /* --------------------------------------------------------------------------
    Coordinate system reference
@@ -214,6 +221,10 @@ static uint8_t             s_velD_count      = 0;
 static AL_ArrowState_t     s_target_arrow    = AL_ARROW_STATE_INIT;
 static AL_ArrowState_t     s_dz_arrow        = AL_ARROW_STATE_INIT;
 /* Text fields are declared as static locals inside each render function. */
+
+/* Font upload progress (0 = init frame, 1-N = data chunks) */
+static uint8_t             s_font_setup_step = 0;
+static bool                s_first_update    = false;
 
 /* --------------------------------------------------------------------------
    Freefall detection  (ported from freefall.js / FlyScope)
@@ -349,7 +360,7 @@ static const char *LaneArrow(float dev_m)
     else if (dev_m < -LANE_MAJOR_M)    return "     >>>";
     else if (dev_m < -LANE_MODERATE_M) return "     >>";
     else if (dev_m < -LANE_MINOR_M)    return "     >";
-    else                               return "   ===";
+    else                               return "    +";
 }
 
 static float AverageVelD(void)
@@ -514,8 +525,8 @@ static void RenderFreefall(const FS_GNSS_Data_t *gnss, const FS_Config_Data_t *c
 static void RenderCompetitionRun(const FS_GNSS_Data_t *gnss, const FS_Config_Data_t *cfg)
 {
     enum {
-        GR_X   = 25,  GR_Y   = 200,  GR_FONT   = 2,   /* glide ratio, left */
-        HS_X   = 85,  HS_Y   = 140,  HS_FONT   = 3,   /* horizontal speed, right */
+        GR_X   = 25,  GR_Y   = 200,  GR_FONT   = 3,   /* glide ratio, left */
+        HS_X   = 85,  HS_Y   = 140,  HS_FONT   = AL_FONT_INCONSOLATA_BOLD_90_ID,   /* horizontal speed, right */
         LANE_X = 30,  LANE_Y = 80, LANE_FONT = 3,   /* lane deviation arrows */
     };
     static AL_TextField_t tf_gr   = AL_TEXTFIELD_INIT(AL_TX(GR_X),  GR_Y);
@@ -535,7 +546,7 @@ static void RenderCompetitionRun(const FS_GNSS_Data_t *gnss, const FS_Config_Dat
     if (gnss->gpsFix == 3) snprintf(raw, sizeof(raw), "%d", (int)((float)gnss->gSpeed * 0.036f));
     // if (gnss->gpsFix == 3) snprintf(raw, sizeof(raw), "%d", 230);
     else                   snprintf(raw, sizeof(raw), "--");
-    AL_Draw_TextField(&tf_hs, HS_FONT, raw);
+    AL_Draw_Spaced_TextField(&tf_hs, HS_FONT, raw);
 
 
     bool has_target = (cfg->al_target_lat != 0 || cfg->al_target_lon != 0);
@@ -674,16 +685,72 @@ void FS_ActiveLook_Mode1_Init(void)
 
     s_target_arrow.valid = false;
     s_dz_arrow.valid     = false;
+
+    s_font_setup_step    = 0;
+    s_first_update       = true;
 }
 
 FS_ActiveLook_SetupStatus_t FS_ActiveLook_Mode1_Setup(void)
 {
-    /* Direct-draw mode — no BLE objects to set up */
-    return FS_AL_SETUP_DONE;
+    /* Font upload state machine for slot AL_FONT_INCONSOLATA_BOLD_90_ID:
+     * Step 0  : fontSave init frame — announces font ID + total byte count
+     * Steps 1+: raw font data in AL_FONT_CHUNK_SIZE-byte chunks
+     * On BLE write failure the step is not advanced (retry next call).
+     * No fontDelete step: deleting a non-existent slot can put the device
+     * in an error state that silently rejects the subsequent fontSave. */
+
+    if (s_font_setup_step == 0)
+    {
+        /* fontSave init frame: FF 51 00 08 <id> <sizeH> <sizeL> AA */
+        uint8_t pkt[8] = {
+            0xFF, 0x51, 0x00, 0x08,
+            AL_FONT_INCONSOLATA_BOLD_90_ID,
+            (uint8_t)(INCONSOLATA_BOLD_90_SIZE >> 8),
+            (uint8_t)(INCONSOLATA_BOLD_90_SIZE & 0xFF),
+            0xAA
+        };
+        if (FS_ActiveLook_Client_WriteWithoutResp(pkt, sizeof(pkt)) != 0)
+            return FS_AL_SETUP_IN_PROGRESS;
+        s_font_setup_step = 1;
+        return FS_AL_SETUP_IN_PROGRESS;
+    }
+
+    /* Data chunk: offset from start of font data */
+    uint16_t offset = (uint16_t)(s_font_setup_step - 1) * AL_FONT_CHUNK_SIZE;
+    if (offset >= INCONSOLATA_BOLD_90_SIZE)
+        return FS_AL_SETUP_DONE;
+
+    uint16_t chunk = INCONSOLATA_BOLD_90_SIZE - offset;
+    if (chunk > AL_FONT_CHUNK_SIZE)
+        chunk = AL_FONT_CHUNK_SIZE;
+
+    /* fontSave data frame: FF 51 00 <total_len> <data...> AA */
+    uint8_t total_len = (uint8_t)(5u + chunk);
+    uint8_t pkt[5u + AL_FONT_CHUNK_SIZE];
+    pkt[0] = 0xFF;
+    pkt[1] = 0x51;
+    pkt[2] = 0x00;
+    pkt[3] = total_len;
+    memcpy(&pkt[4], &inconsolata_bold_90[offset], chunk);
+    pkt[4 + chunk] = 0xAA;
+    if (FS_ActiveLook_Client_WriteWithoutResp(pkt, total_len) != 0)
+        return FS_AL_SETUP_IN_PROGRESS;
+
+    s_font_setup_step++;
+
+    return ((uint16_t)(offset + chunk) >= INCONSOLATA_BOLD_90_SIZE)
+           ? FS_AL_SETUP_DONE
+           : FS_AL_SETUP_IN_PROGRESS;
 }
 
 void FS_ActiveLook_Mode1_Update(void)
 {
+    if (s_first_update)
+    {
+        OnPhaseEnter();
+        s_first_update = false;
+    }
+
     const FS_GNSS_Data_t   *gnss   = FS_GNSS_GetData();
     const FS_Config_Data_t *cfg    = FS_Config_Get();
     const FS_VBAT_Data_t   *vbat   = FS_VBAT_GetData();
