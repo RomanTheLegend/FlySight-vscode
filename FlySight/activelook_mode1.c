@@ -526,7 +526,7 @@ static void RenderCompetitionRun(const FS_GNSS_Data_t *gnss, const FS_Config_Dat
 {
     enum {
         GR_X   = 25,  GR_Y   = 200,  GR_FONT   = 3,   /* glide ratio, left */
-        HS_X   = 85,  HS_Y   = 140,  HS_FONT   = AL_FONT_INCONSOLATA_BOLD_90_ID,   /* horizontal speed, right */
+        HS_X   = 55,  HS_Y   = 140,  HS_FONT   = AL_FONT_INCONSOLATA_BOLD_90_ID,   /* horizontal speed, right */
         LANE_X = 30,  LANE_Y = 80, LANE_FONT = 3,   /* lane deviation arrows */
     };
     static AL_TextField_t tf_gr   = AL_TEXTFIELD_INIT(AL_TX(GR_X),  GR_Y);
