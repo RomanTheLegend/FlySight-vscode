@@ -44,6 +44,11 @@ static uint8_t tx_flow_status;
 
 static void BLE_TX_Queue_Transmit(void);
 
+void BLE_TX_Queue_Flush(void)
+{
+	tx_write_index = tx_read_index;
+}
+
 void BLE_TX_Queue_Init(void)
 {
 	tx_read_index = 0;

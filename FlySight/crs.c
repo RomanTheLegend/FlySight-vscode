@@ -365,6 +365,7 @@ static FS_CRS_State_t FS_CRS_State_Dir(void)
 			switch (packet->data[0])
 			{
 			case FS_CRS_COMMAND_CANCEL:
+				BLE_TX_Queue_Flush();
 				next_state = FS_CRS_STATE_IDLE;
 				break;
 			}
@@ -443,6 +444,7 @@ static FS_CRS_State_t FS_CRS_State_Read(void)
 			switch (packet->data[0])
 			{
 			case FS_CRS_COMMAND_CANCEL:
+				BLE_TX_Queue_Flush();
 				next_state = FS_CRS_STATE_IDLE;
 				break;
 			case FS_CRS_COMMAND_FILE_ACK:
@@ -531,6 +533,10 @@ static FS_CRS_State_t FS_CRS_State_Write(void)
 		next_state = FS_CRS_STATE_IDLE;
 	}
 
+	// BLE stack may deduplicate repeated identical write-without-response packets,
+	// so refresh the connection timeout here rather than relying solely on OnRxWrite
+	Custom_CRS_RefreshTimeout();
+
 	while ((next_state == FS_CRS_STATE_WRITE) && (packet = Custom_CRS_GetNextRxPacket()))
 	{
 		if (packet->length >= 1)
@@ -553,11 +559,16 @@ static FS_CRS_State_t FS_CRS_State_Write(void)
 
 						// Reset timeout timer
 						HW_TS_Start(ack_timer_id, RX_TIMEOUT_TICKS);
-					}
 
-					if (packet->length == 2)
+						if (packet->length == 2)
+						{
+							next_state = FS_CRS_STATE_IDLE;
+						}
+					}
+					else if (packet->data[1] == ((next_packet - 1) & 0xff))
 					{
-						next_state = FS_CRS_STATE_IDLE;
+						// Re-ACK already-processed packet (retry after lost ACK)
+						FS_CRS_SendPacket(FS_CRS_COMMAND_FILE_ACK, &packet->data[1], 1);
 					}
 				}
 				break;

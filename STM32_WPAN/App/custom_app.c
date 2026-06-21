@@ -37,6 +37,7 @@
 #include "sensor_data.h"
 #include "device_state.h"
 #include "control_point_protocol.h"
+#include "vbat.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -107,6 +108,10 @@ extern uint8_t SizeSd_Control_Point;
 static uint8_t timeout_timer_id;
 
 static uint8_t current_battery_level_percent = 0;
+static uint8_t ble_vbat_started = 0;
+static uint8_t ble_adc_started = 0;
+
+extern ADC_HandleTypeDef hadc1;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -769,6 +774,20 @@ static void Custom_CRS_OnConnect(Custom_App_ConnHandle_Not_evt_t *pNotification)
   // Remember connection handle
   Custom_App_Context.ConnectionHandle = pNotification->ConnectionHandle;
 
+  // Start VBAT measurement for battery level reporting when not in active mode
+  // (active mode manages VBAT independently via FS_ActiveMode_Init)
+  if (FS_Mode_State() != FS_MODE_STATE_ACTIVE)
+  {
+    if (HAL_ADC_GetState(&hadc1) == HAL_ADC_STATE_RESET)
+    {
+      MX_ADC1_Init();
+      HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
+      ble_adc_started = 1;
+    }
+    FS_VBAT_Init();
+    ble_vbat_started = 1;
+  }
+
   // Start timeout timer
   APP_DBG_MSG("Start connection timeout\n");
   HW_TS_Start(timeout_timer_id, TIMEOUT_TICKS);
@@ -779,6 +798,18 @@ static void Custom_CRS_OnDisconnect(void)
   // Stop timeout timer
   APP_DBG_MSG("Stop connection timeout\n");
   HW_TS_Stop(timeout_timer_id);
+
+  // Stop VBAT measurement if BLE started it
+  if (ble_vbat_started)
+  {
+    FS_VBAT_DeInit();
+    ble_vbat_started = 0;
+  }
+  if (ble_adc_started)
+  {
+    HAL_ADC_DeInit(&hadc1);
+    ble_adc_started = 0;
+  }
 
   // Update state
   connected_flag = 0;
@@ -872,6 +903,14 @@ static void Custom_App_Timeout(void)
   APP_DBG_MSG("Connection timeout triggered\n");
   aci_gap_terminate(Custom_App_Context.ConnectionHandle,
 		  HCI_REMOTE_USER_TERMINATED_CONNECTION_ERR_CODE);
+}
+
+void Custom_CRS_RefreshTimeout(void)
+{
+  if (connected_flag)
+  {
+    HW_TS_Start(timeout_timer_id, TIMEOUT_TICKS);
+  }
 }
 
 void Custom_Mode_Update(uint8_t newMode)
