@@ -173,6 +173,7 @@ int main(void)
   MX_SPI1_Init();
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
+  WRITE_REG(IWDG->KR, IWDG_KEY_RELOAD);
   FS_State_Init();
   FS_IMU_Init();
   FS_Mag_Init();
