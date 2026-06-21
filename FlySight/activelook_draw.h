@@ -94,6 +94,10 @@ typedef struct {
  */
 void AL_Draw_TextField(AL_TextField_t *field, uint8_t font, const char *str);
 
+/* Same as AL_Draw_TextField but inserts a space between every character.
+ * "180" is rendered as "1 8 0".  Requires the font to include ASCII 32 (space). */
+void AL_Draw_Spaced_TextField(AL_TextField_t *field, uint8_t font, const char *str);
+
 /* ---- Arrow with per-instance erase state --------------------------------- */
 
 /*

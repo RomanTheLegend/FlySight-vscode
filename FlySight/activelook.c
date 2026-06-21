@@ -99,11 +99,8 @@ static void OnActiveLookDiscoveryComplete(void)
     // Initialize state
     s_state = AL_STATE_CFG_WRITE;
 
-    // Begin updates
+    // Begin updates (battery notifications are handled inside activelook_client.c)
     UTIL_SEQ_SetTask(1 << CFG_TASK_FS_ACTIVELOOK_ID, CFG_SCH_PRIO_0);
-
-    // Start Battery notifications
-    FS_ActiveLook_Client_EnableBatteryNotifications();
 }
 
 /*******************************************************************************
@@ -159,7 +156,12 @@ static void FS_ActiveLook_Task(void)
         packet[lenPos] = idx;
 
         /* Now send it with Write Without Response */
-        FS_ActiveLook_Client_WriteWithoutResp(packet, idx);
+        if (FS_ActiveLook_Client_WriteWithoutResp(packet, idx) != 0)
+        {
+            /* BLE stack busy — retry on next scheduler pass */
+            UTIL_SEQ_SetTask(1 << CFG_TASK_FS_ACTIVELOOK_ID, CFG_SCH_PRIO_0);
+            break;
+        }
 
         /* Get mode from config file */
         AL_SelectMode(FS_Config_Get()->al_mode - 1);
@@ -178,7 +180,7 @@ static void FS_ActiveLook_Task(void)
             if (status == FS_AL_SETUP_DONE)
             {
                 // Once the mode is fully set up, move on
-                s_state = AL_STATE_CFG_SET;
+                s_state = AL_STATE_CLEAR;
             }
             else
             {
