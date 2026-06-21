@@ -29,6 +29,7 @@
 typedef void (*BLE_TX_Queue_callback_t)(void);
 
 void BLE_TX_Queue_Init(void);
+void BLE_TX_Queue_Flush(void);
 void BLE_TX_Queue_TxPoolAvailableNotification(void);
 
 uint8_t *BLE_TX_Queue_GetNextTxPacket(void);
