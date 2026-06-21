@@ -665,20 +665,39 @@ void HAL_RNG_MspDeInit(RNG_HandleTypeDef* hrng)
 */
 void HAL_RTC_MspInit(RTC_HandleTypeDef* hrtc)
 {
-  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
   if(hrtc->Instance==RTC)
   {
   /* USER CODE BEGIN RTC_MspInit 0 */
 
   /* USER CODE END RTC_MspInit 0 */
 
-  /** Initializes the peripherals clock
-  */
-    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_RTC;
-    PeriphClkInitStruct.RTCClockSelection = RCC_RTCCLKSOURCE_LSE;
-    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
+    HAL_PWR_EnableBkUpAccess();
+
+    uint32_t rtcSrc = LL_RCC_GetRTCClockSource();
+    if (rtcSrc != LL_RCC_RTC_CLKSOURCE_LSE)
     {
-      Error_Handler();
+      if (rtcSrc != LL_RCC_RTC_CLKSOURCE_NONE)
+      {
+        /* Bootloader left a different RTC source (e.g. LSI). Must reset the
+         * backup domain before changing RTCSEL. */
+        LL_RCC_ForceBackupDomainReset();
+        LL_RCC_ReleaseBackupDomainReset();
+        HAL_PWR_EnableBkUpAccess();
+        LL_RCC_LSE_Enable();
+      }
+      LL_RCC_SetRTCClockSource(LL_RCC_RTC_CLKSOURCE_LSE);
+      /* Wait for LSE, kicking IWDG so the bootloader's watchdog cannot fire
+       * during the crystal startup (up to ~5 s on a cold start). */
+      uint32_t ts = HAL_GetTick();
+      while (LL_RCC_LSE_IsReady() == 0U)
+      {
+        WRITE_REG(IWDG->KR, IWDG_KEY_RELOAD);
+        if ((HAL_GetTick() - ts) > 5000U)
+        {
+          Error_Handler();
+          break;
+        }
+      }
     }
 
     /* Peripheral clock enable */
