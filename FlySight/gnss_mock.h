@@ -14,7 +14,7 @@
  * MOCK.CSV must be placed in the root of the SD card.  See gnss_mock.c for
  * the expected CSV column layout.
  */
-#define GNSS_MOCK_ENABLED  1
+#define GNSS_MOCK_ENABLED  0
 
 #if GNSS_MOCK_ENABLED
 

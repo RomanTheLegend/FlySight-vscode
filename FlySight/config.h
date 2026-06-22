@@ -190,7 +190,11 @@ typedef enum {
 	FS_CONFIG_ERR
 } FS_Config_Result_t;
 
+extern const char *FS_Config_Filename;
+extern const char *FS_Incoming_Config_Filename;
+
 void FS_Config_Init(void);
+void FS_Config_CheckIncoming(void);
 FS_Config_Result_t FS_Config_Read(const char *filename);
 FS_Config_Result_t FS_Config_Write(const char *filename);
 const FS_Config_Data_t *FS_Config_Get(void);
