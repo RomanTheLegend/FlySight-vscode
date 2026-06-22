@@ -965,14 +965,7 @@ static void Ble_Hci_Gap_Gatt_Init(void)
    * The RNG may be used to provide a random number on each power on
    */
 #if (CFG_IDENTITY_ADDRESS == GAP_STATIC_RANDOM_ADDR)
-#if defined(CFG_STATIC_RANDOM_ADDRESS)
-  a_srd_bd_addr[0] = CFG_STATIC_RANDOM_ADDRESS & 0xFFFFFFFF;
-  a_srd_bd_addr[1] = (uint32_t)((uint64_t)CFG_STATIC_RANDOM_ADDRESS >> 32);
-  a_srd_bd_addr[1] |= 0xC000; /* The two upper bits shall be set to 1 */
-#else
-  FS_Common_GetRandomBytes(a_srd_bd_addr, 2);
-  a_srd_bd_addr[1] |= 0xC000; /* The two upper bits shall be set to 1 */
-#endif /* CFG_STATIC_RANDOM_ADDRESS */
+  memcpy(a_srd_bd_addr, FS_State_Get()->ble_addr, CONFIG_DATA_RANDOM_ADDRESS_LEN);
 #endif
 
 #if (CFG_BLE_ADDRESS_TYPE == GAP_STATIC_RANDOM_ADDR)
