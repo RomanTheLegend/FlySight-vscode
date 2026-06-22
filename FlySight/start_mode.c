@@ -47,9 +47,10 @@ void FS_StartMode_Init(void)
 
 	/* Initialize configuration */
 	FS_Config_Init();
-	if (FS_Config_Read("/config.txt") != FS_CONFIG_OK)
+	FS_Config_CheckIncoming();
+	if (FS_Config_Read(FS_Config_Filename) != FS_CONFIG_OK)
 	{
-		FS_Config_Write("/config.txt");
+		FS_Config_Write(FS_Config_Filename);
 	}
 
 	/* Read selectable config */

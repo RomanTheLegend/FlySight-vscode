@@ -90,6 +90,7 @@ target_sources(${BUILD_UNIT_0_NAME} PRIVATE
     "FlySight/led.c"
     "FlySight/log.c"
     "FlySight/mag.c"
+    "FlySight/md5.c"
     "FlySight/mode.c"
     "FlySight/nav.c"
     "FlySight/pairing_mode.c"

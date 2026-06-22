@@ -31,6 +31,9 @@
 #include "state.h"
 #include "stm32_seq.h"
 
+const char *FS_Config_Filename = "/config.txt";
+const char *FS_Incoming_Config_Filename = "/_config.TXT";
+
 #define PLAY_TIMER_MSEC    10
 #define PLAY_TIMER_TICKS   (PLAY_TIMER_MSEC*1000/CFG_TS_TICK_VAL)
 
@@ -167,7 +170,8 @@ void FS_ConfigMode_Init(void)
 
 	// Initialize configuration
 	FS_Config_Init();
-	FS_Config_Read("/config.txt");
+	FS_Config_CheckIncoming();
+	FS_Config_Read(FS_Config_Filename);
 
 	// Initialize audio
 	FS_Audio_Init();

@@ -21,10 +21,13 @@
 **  Website: http://flysight.ca/                                          **
 ****************************************************************************/
 
+#include <stdbool.h>
+#include <string.h>
 #include "main.h"
 #include "app_common.h"
 #include "config.h"
 #include "ff.h"
+#include "md5.h"
 #include "state.h"
 
 #define CONFIG_FIRST_ALARM   0x01
@@ -34,6 +37,89 @@
 
 static FS_Config_Data_t config;
 static FIL configFile;
+
+#define INCOMING_MD5_FILENAME "/_config.md5"
+#define INCOMING_CHUNK_SIZE   512
+
+static void bytes_to_hex(const uint8_t *bytes, uint32_t len, char *out)
+{
+	static const char hex[] = "0123456789abcdef";
+	for (uint32_t i = 0; i < len; i++)
+	{
+		out[i * 2]     = hex[bytes[i] >> 4];
+		out[i * 2 + 1] = hex[bytes[i] & 0xf];
+	}
+	out[len * 2] = '\0';
+}
+
+void FS_Config_CheckIncoming(void)
+{
+	FILINFO fno;
+	FIL     inFile, outFile, md5File;
+	uint8_t chunk[INCOMING_CHUNK_SIZE];
+	UINT    br;
+	MD5_Context ctx;
+	uint8_t digest[16];
+	char    computedHex[33];
+	char    expectedHex[33];
+	bool    match = false;
+
+	/* Nothing to do if incoming config doesn't exist */
+	if (f_stat(FS_Incoming_Config_Filename, &fno) != FR_OK)
+		return;
+
+	/* Compute MD5 of incoming config */
+	MD5_Init(&ctx);
+	if (f_open(&inFile, FS_Incoming_Config_Filename, FA_READ) == FR_OK)
+	{
+		while (f_read(&inFile, chunk, sizeof(chunk), &br) == FR_OK && br > 0)
+			MD5_Update(&ctx, chunk, br);
+		f_close(&inFile);
+	}
+	MD5_Final(digest, &ctx);
+	bytes_to_hex(digest, 16, computedHex);
+
+	/* Read expected MD5 from config.md5 */
+	if (f_open(&md5File, INCOMING_MD5_FILENAME, FA_READ) == FR_OK)
+	{
+		if (f_gets(expectedHex, sizeof(expectedHex), &md5File) != NULL)
+		{
+			/* Trim trailing whitespace */
+			size_t len = strlen(expectedHex);
+			while (len > 0 && (expectedHex[len-1] == '\r' || expectedHex[len-1] == '\n' ||
+			                   expectedHex[len-1] == ' '  || expectedHex[len-1] == '\t'))
+				expectedHex[--len] = '\0';
+
+			if (strcmp(computedHex, expectedHex) == 0)
+				match = true;
+		}
+		f_close(&md5File);
+	}
+
+	if (match)
+	{
+		/* Write new config: MD5 comment line + incoming content */
+		if (f_open(&outFile, FS_Config_Filename, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK)
+		{
+			f_printf(&outFile, "; MD5: %s\n", computedHex);
+
+			if (f_open(&inFile, FS_Incoming_Config_Filename, FA_READ) == FR_OK)
+			{
+				while (f_read(&inFile, chunk, sizeof(chunk), &br) == FR_OK && br > 0)
+				{
+					UINT bw;
+					f_write(&outFile, chunk, br, &bw);
+				}
+				f_close(&inFile);
+			}
+			f_close(&outFile);
+		}
+	}
+
+	/* Clean up regardless of match */
+	f_unlink(FS_Incoming_Config_Filename);
+	f_unlink(INCOMING_MD5_FILENAME);
+}
 
 static const char defaultConfig[] =
 		"; FlySight - http://flysight.ca\n"
@@ -466,7 +552,7 @@ FS_Config_Result_t FS_Config_Read(const char *filename)
 		HANDLE_VALUE("Max_Dist",  config.max_dist,     val, val >= 0 && val <= 10000);
 		HANDLE_VALUE("Min_Angle", config.min_angle,    val, val >= 0 && val <= 360);
 
-		HANDLE_VALUE("AL_Mode",   config.al_mode,      val, val >= 0 && val <= 1);
+		HANDLE_VALUE("AL_Mode",   config.al_mode,      val, val >= 0 && val <= 2);
 		HANDLE_VALUE("AL_Rate",   config.al_rate,      val, val >= 100);
 
 		#undef HANDLE_VALUE
