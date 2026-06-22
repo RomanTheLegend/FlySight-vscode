@@ -46,6 +46,7 @@ typedef struct
 	uint8_t  reset_ble;
 	uint8_t  ble_irk[CONFIG_DATA_IR_LEN];
 	uint8_t  ble_erk[CONFIG_DATA_ER_LEN];
+	uint8_t  ble_addr[CONFIG_DATA_RANDOM_ADDRESS_LEN];
 	FS_State_ActiveMode_t active_mode;
 } FS_State_Data_t;
 
