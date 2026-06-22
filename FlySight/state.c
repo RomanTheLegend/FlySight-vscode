@@ -158,6 +158,7 @@ void FS_State_Read(void)
 	memset(state.session_id, 0, 4 * 3);
 	memset(state.ble_irk, 0, CONFIG_DATA_IR_LEN);
 	memset(state.ble_erk, 0, CONFIG_DATA_ER_LEN);
+	memset(state.ble_addr, 0, CONFIG_DATA_RANDOM_ADDRESS_LEN);
 	state.active_mode = FS_ACTIVE_MODE_DEFAULT;
 
 	if (f_open(&stateFile, "/flysight.txt", FA_READ) != FR_OK)
@@ -214,6 +215,11 @@ void FS_State_Read(void)
 			FS_State_ReadHex_8(result, state.ble_erk, CONFIG_DATA_ER_LEN);
 		}
 
+		if (!strcmp(name, "BLE_Addr") && (strlen(result) == 2 * CONFIG_DATA_RANDOM_ADDRESS_LEN))
+		{
+			FS_State_ReadHex_8(result, state.ble_addr, CONFIG_DATA_RANDOM_ADDRESS_LEN);
+		}
+
 		#undef HANDLE_VALUE
 	}
 
@@ -234,6 +240,15 @@ void FS_State_Read(void)
 	while (is_all_zeros(state.ble_erk, CONFIG_DATA_ER_LEN))
 	{
 		FS_Common_GetRandomBytes((uint32_t *) state.ble_erk, CONFIG_DATA_ER_LEN / 4);
+	}
+
+	/* Initialize static random BLE address if needed */
+	while (is_all_zeros(state.ble_addr, CONFIG_DATA_RANDOM_ADDRESS_LEN))
+	{
+		uint32_t tmp[2];
+		FS_Common_GetRandomBytes(tmp, 2);
+		memcpy(state.ble_addr, tmp, CONFIG_DATA_RANDOM_ADDRESS_LEN);
+		state.ble_addr[5] |= 0xC0; /* BLE static random: top 2 bits must be 1 */
 	}
 }
 
@@ -300,6 +315,10 @@ static void FS_State_Write(void)
 
 	f_printf(&stateFile, "BLE_ERK:      ");
 	FS_State_WriteHex_8(&stateFile, state.ble_erk, 16);
+	f_printf(&stateFile, "\n");
+
+	f_printf(&stateFile, "BLE_Addr:     ");
+	FS_State_WriteHex_8(&stateFile, state.ble_addr, CONFIG_DATA_RANDOM_ADDRESS_LEN);
 	f_printf(&stateFile, "\n\n");
 
 	f_printf(&stateFile, "; Active mode\n\n");
