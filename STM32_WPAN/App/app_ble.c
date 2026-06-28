@@ -259,8 +259,9 @@ void (*Next_Adv_Callback)(void) = 0;
 /* Pairing request flag */
 uint8_t request_pairing = 0;
 
-/* BD Address of device to be connected once discovered */
+/* BD Address and address type of device to be connected once discovered */
 tBDAddr P2P_SERVER1_BDADDR;
+static uint8_t s_peer_addr_type = GAP_PUBLIC_ADDR;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -602,44 +603,24 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
           adv_report_data = (uint8_t*)(&le_advertising_event->Advertising_Report[0].Length_Data) + 1;
           k = 0;
 
-          // Define the target device name we are looking for
-          char targetDeviceName[14];
-          snprintf(targetDeviceName, sizeof(targetDeviceName),
-        		   "ENGO 2 %.*s", 6, FS_Config_Get()->al_id);
-          const size_t targetDeviceNameLen = strlen(targetDeviceName);
+          // AL_ID substring we are looking for in the advertised device name
+          // al_id is a 6-byte array with no guaranteed null terminator — use bounded length
+          const char *al_id = FS_Config_Get()->al_id;
+          size_t al_id_len = 0;
+          while (al_id_len < 6 && al_id[al_id_len] != '\0')
+              al_id_len++;
 
-          // Flags to track if we found the required data within *this specific* advertising report
-          uint8_t foundMfgData = 0; // Flag for correct manufacturer data
-          uint8_t foundDeviceName = 0; // Flag for correct device name
+          uint8_t foundDeviceName = 0;
 
           /* search AD TYPE 0x09 (Complete Local Name) */
           /* search AD Type 0x02 (16 bits UUIDS) */
-          if (event_type == ADV_IND)
+          if (event_type == ADV_IND || event_type == SCAN_RSP)
           {
             while(k < event_data_size)
             {
               adlength = adv_report_data[k];
               adtype = adv_report_data[k + 1];
-              if (adtype == AD_TYPE_MANUFACTURER_SPECIFIC_DATA)
-              {
-                /* The payload starts at adv_report_data[k + 2], and its length is (adlength - 1). */
-                const uint8_t *mfg_data = &adv_report_data[k + 2];
-                uint8_t mfg_len = adlength - 1; // total bytes in manufacturer data
-
-                /* The ActiveLook doc says we should see 0x08F2 at the end.
-                   For example: 0xDAFA08F2 or some variation. So let's do: */
-                if (mfg_len >= 2)
-                {
-                  /* Check the last two bytes of manufacturer data. */
-                  uint16_t last2 = (mfg_data[mfg_len - 2] << 8) | mfg_data[mfg_len - 1];
-                  if (last2 == 0x08F2)
-                  {
-                    APP_DBG_MSG("-- Found ActiveLook device (mfg data ends with 0x08F2)\n\r");
-                    foundMfgData = 1; // Set flag indicating manufacturer data is correct
-                  }
-                }
-              }
-              else if (adtype == AD_TYPE_COMPLETE_LOCAL_NAME || adtype == AD_TYPE_SHORTENED_LOCAL_NAME)
+              if (adtype == AD_TYPE_COMPLETE_LOCAL_NAME || adtype == AD_TYPE_SHORTENED_LOCAL_NAME)
               {
                 const uint8_t *name_data = &adv_report_data[k + 2];
                 uint8_t name_len = adlength - 1;
@@ -648,24 +629,30 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
                 for(int i=0; i<name_len; i++) { APP_DBG_MSG("%c", name_data[i]); }
                 APP_DBG_MSG("'\n\r");
 
-                // Compare the found name with the target name
-                if ((name_len == targetDeviceNameLen) &&
-                		(memcmp(name_data, targetDeviceName, targetDeviceNameLen) == 0))
+                /* Substring search: accept any device whose name contains al_id */
+                if (al_id_len > 0 && name_len >= al_id_len)
                 {
-                   APP_DBG_MSG("-- Device Name matches target '%s'\n\r", targetDeviceName);
-                   foundDeviceName = 1; // Set flag indicating device name is correct
+                  for (uint8_t i = 0; i <= name_len - al_id_len; i++)
+                  {
+                    if (memcmp(&name_data[i], al_id, al_id_len) == 0)
+                    {
+                      APP_DBG_MSG("-- Device Name contains AL_ID '%s'\n\r", al_id);
+                      foundDeviceName = 1;
+                      break;
+                    }
+                  }
                 }
               }
 
               k += adlength + 1;
             } /* end while(k < event_data_size) */
 
-            // Check if *both* flags are set after processing all AD structures in this report
-            if (foundMfgData && foundDeviceName)
+            if (foundDeviceName)
             {
-                APP_DBG_MSG("-- Found matching ENGO 2 device!\n\r");
+                APP_DBG_MSG("-- Found matching ActiveLook device!\n\r");
                 BleApplicationContext.EndDevice1Found = 0x01;
-                // Store the BD Address of this device
+                // Store the BD Address and address type of this device
+                s_peer_addr_type = le_advertising_event->Advertising_Report[0].Address_Type;
                 P2P_SERVER1_BDADDR[0] = le_advertising_event->Advertising_Report[0].Address[0];
                 P2P_SERVER1_BDADDR[1] = le_advertising_event->Advertising_Report[0].Address[1];
                 P2P_SERVER1_BDADDR[2] = le_advertising_event->Advertising_Report[0].Address[2];
@@ -673,9 +660,10 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
                 P2P_SERVER1_BDADDR[4] = le_advertising_event->Advertising_Report[0].Address[4];
                 P2P_SERVER1_BDADDR[5] = le_advertising_event->Advertising_Report[0].Address[5];
 
-                APP_DBG_MSG("   Address: %02X:%02X:%02X:%02X:%02X:%02X\n\r",
+                APP_DBG_MSG("   Address: %02X:%02X:%02X:%02X:%02X:%02X type=%d\n\r",
                             P2P_SERVER1_BDADDR[5], P2P_SERVER1_BDADDR[4], P2P_SERVER1_BDADDR[3],
-                            P2P_SERVER1_BDADDR[2], P2P_SERVER1_BDADDR[1], P2P_SERVER1_BDADDR[0]);
+                            P2P_SERVER1_BDADDR[2], P2P_SERVER1_BDADDR[1], P2P_SERVER1_BDADDR[0],
+                            s_peer_addr_type);
             }
           } /* end if (event_type == ADV_IND) */
           break;
@@ -847,7 +835,12 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
           APP_DBG_MSG("\n");
 
           /* USER CODE BEGIN ACI_GAP_PAIRING_COMPLETE_VSEVT_CODE*/
-
+          if (p_pairing_complete->Status != 0)
+          {
+            /* Clear stale bonds so the next attempt starts fresh on our side */
+            aci_gap_clear_security_db();
+            APP_DBG_MSG("     - Security DB cleared after pairing failure\n");
+          }
           /* USER CODE END ACI_GAP_PAIRING_COMPLETE_VSEVT_CODE*/
           break;
         /* PAIRING */
@@ -1706,7 +1699,7 @@ static void Connect_Request(void)
     /* USER CODE END APP_BLE_CONNECTED_SUCCESS_END_DEVICE_1 */
     result = aci_gap_create_connection(SCAN_P,
                                        SCAN_L,
-                                       GAP_PUBLIC_ADDR,
+                                       s_peer_addr_type,
                                        P2P_SERVER1_BDADDR,
                                        CFG_BLE_ADDRESS_TYPE,
                                        0x0006,
