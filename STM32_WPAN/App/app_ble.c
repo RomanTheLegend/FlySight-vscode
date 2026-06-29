@@ -46,6 +46,8 @@
 #include "state.h"
 #include "activelook_client.h"
 #include "activelook.h"
+#include "vuzix_client.h"
+#include "vuzix.h"
 #include "config.h"
 /* USER CODE END Includes */
 
@@ -502,7 +504,10 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
         APP_DBG_MSG("\r\n\r** DISCONNECTION EVENT OF END DEVICE 1 \n\r");
         BleApplicationContext.EndDevice_Connection_Status[0] = APP_BLE_IDLE;
         BleApplicationContext.connectionHandleEndDevice1 = 0xFFFF;
-        FS_ActiveLook_HandleDisconnect();
+        if (FS_Config_Get()->hud_device_type == 1)
+            FS_Vuzix_HandleDisconnect();
+        else
+            FS_ActiveLook_HandleDisconnect();
       }
 
       if (p_disconnection_complete_event->Connection_Handle == BleApplicationContext.connectionHandleCentral)
@@ -559,7 +564,10 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
         	  APP_DBG_MSG("-- CONNECTION SUCCESS WITH END DEVICE 1\n\r");
         	  BleApplicationContext.EndDevice_Connection_Status[0] = APP_BLE_CONNECTED;
         	  BleApplicationContext.connectionHandleEndDevice1 = connection_handle;
-        	  FS_ActiveLook_Client_StartDiscovery(connection_handle);
+        	  if (FS_Config_Get()->hud_device_type == 1)
+        	      FS_Vuzix_Client_StartDiscovery(connection_handle);
+        	  else
+        	      FS_ActiveLook_Client_StartDiscovery(connection_handle);
           }
           else
           {
@@ -603,9 +611,11 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
           adv_report_data = (uint8_t*)(&le_advertising_event->Advertising_Report[0].Length_Data) + 1;
           k = 0;
 
-          // AL_ID substring we are looking for in the advertised device name
-          // al_id is a 6-byte array with no guaranteed null terminator — use bounded length
-          const char *al_id = FS_Config_Get()->al_id;
+          /* Device name substring to match — al_id for ActiveLook, vuzix_id for Vuzix */
+          const FS_Config_Data_t *hud_cfg = FS_Config_Get();
+          const char *al_id = (hud_cfg->hud_device_type == 1)
+                              ? hud_cfg->vuzix_id
+                              : hud_cfg->al_id;
           size_t al_id_len = 0;
           while (al_id_len < 6 && al_id[al_id_len] != '\0')
               al_id_len++;
@@ -752,7 +762,7 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
                 UTIL_SEQ_SetTask(1 << CFG_TASK_CONN_DEV_1_ID, CFG_SCH_PRIO_0);
               }
               else if (BleApplicationContext.EndDevice_Connection_Status[0] != APP_BLE_CONNECTED
-                       && FS_Config_Get()->al_mode != 0)
+                       && FS_Config_Get()->hud_mode != 0)
               {
                 /* Device not found this scan window — retry until it comes back */
                 APP_DBG_MSG("-- ActiveLook device not found, retrying scan\n\r");
@@ -858,8 +868,14 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
         /* USER CODE END BLUE_EVT */
       }
 
-      /* AFTER you handle your own cases, also pass the event to the ActiveLook client. */
-      FS_ActiveLook_Client_EventHandler((void*)p_blecore_evt, HCI_VENDOR_SPECIFIC_DEBUG_EVT_CODE);
+      /* Pass the event to the active HUD client, if one is configured. */
+      if (FS_Config_Get()->hud_mode != 0)
+      {
+          if (FS_Config_Get()->hud_device_type == 1)
+              FS_Vuzix_Client_EventHandler((void*)p_blecore_evt, HCI_VENDOR_SPECIFIC_DEBUG_EVT_CODE);
+          else
+              FS_ActiveLook_Client_EventHandler((void*)p_blecore_evt, HCI_VENDOR_SPECIFIC_DEBUG_EVT_CODE);
+      }
 
       break; /* HCI_VENDOR_SPECIFIC_DEBUG_EVT_CODE */
 

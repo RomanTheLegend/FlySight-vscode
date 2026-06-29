@@ -164,7 +164,7 @@ static void FS_ActiveLook_Task(void)
         }
 
         /* Get mode from config file */
-        AL_SelectMode(FS_Config_Get()->al_mode - 1);
+        AL_SelectMode(FS_Config_Get()->hud_mode - 1);
 
         /* Next config step */
         s_state = AL_STATE_SETUP;
@@ -241,7 +241,7 @@ static void FS_ActiveLook_Task(void)
         s_state = AL_STATE_READY;
 
     	/* Start update timer */
-    	HW_TS_Start(timer_id, FS_Config_Get()->al_rate * 1000 / CFG_TS_TICK_VAL);
+    	HW_TS_Start(timer_id, FS_Config_Get()->hud_rate * 1000 / CFG_TS_TICK_VAL);
         break;
     }
 

@@ -171,15 +171,17 @@ typedef struct
 	uint16_t max_dist;
 	uint16_t min_angle;
 
+	uint8_t  hud_device_type;  /* 0 = ActiveLook, 1 = Vuzix */
 	char     al_id[6];
-	uint8_t  al_mode;
-	uint32_t al_rate;
+	char     vuzix_id[6];
+	uint8_t  hud_mode;
+	uint32_t hud_rate;
 
 	FS_Config_AL_Line_t al_lines[FS_CONFIG_MAX_AL_LINES];
 	uint8_t  num_al_lines;
 
-	int32_t  al_target_lat;    /* competition run target, 1e-7 deg */
-	int32_t  al_target_lon;
+	int32_t  target_lat;       /* competition run target, 1e-7 deg */
+	int32_t  target_lon;
 
 	// Flag to control whether navigation modes are allowed
 	uint8_t  enable_nav;

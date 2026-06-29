@@ -441,12 +441,14 @@ void FS_Config_Init(void)
 	config.max_dist       = 10000;
 	config.min_angle      = 5;
 
-	*(config.al_id) = '\0';
-	config.al_mode        = 1;
-	config.al_rate        = 1000;
-	config.num_al_lines   = 0;
-	config.al_target_lat  = 0;
-	config.al_target_lon  = 0;
+	config.hud_device_type = 0;
+	*(config.al_id)        = '\0';
+	*(config.vuzix_id)     = '\0';
+	config.hud_mode        = 1;
+	config.hud_rate        = 1000;
+	config.num_al_lines    = 0;
+	config.target_lat      = 0;
+	config.target_lon      = 0;
 
 	// IMPORTANT: Navigation disabled by default
 	config.enable_nav     = 0;
@@ -545,15 +547,16 @@ FS_Config_Result_t FS_Config_Read(const char *filename)
 
 		HANDLE_VALUE("Lat",        config.lat,           val, val >= -900000000 && val <= 900000000);
 		HANDLE_VALUE("Lon",        config.lon,           val, val >= -1800000000 && val <= 1800000000);
-		HANDLE_VALUE("Target_Lat", config.al_target_lat, val, val >= -900000000 && val <= 900000000);
-		HANDLE_VALUE("Target_Lon", config.al_target_lon, val, val >= -1800000000 && val <= 1800000000);
+		HANDLE_VALUE("Target_Lat",  config.target_lat,       val, val >= -900000000 && val <= 900000000);
+		HANDLE_VALUE("Target_Lon",  config.target_lon,       val, val >= -1800000000 && val <= 1800000000);
+		HANDLE_VALUE("HUD_Device_Type", config.hud_device_type, val, val == 0 || val == 1);
 		HANDLE_VALUE("Bearing",   config.bearing,      val, val >= 0 && val <= 360);
 		HANDLE_VALUE("End_Nav",   config.end_nav,      val * 1000, TRUE);
 		HANDLE_VALUE("Max_Dist",  config.max_dist,     val, val >= 0 && val <= 10000);
 		HANDLE_VALUE("Min_Angle", config.min_angle,    val, val >= 0 && val <= 360);
 
-		HANDLE_VALUE("AL_Mode",   config.al_mode,      val, val >= 0 && val <= 2);
-		HANDLE_VALUE("AL_Rate",   config.al_rate,      val, val >= 100);
+		HANDLE_VALUE("HUD_Mode",  config.hud_mode,     val, val >= 0 && val <= 2);
+		HANDLE_VALUE("HUD_Rate",  config.hud_rate,     val, val >= 100);
 
 		#undef HANDLE_VALUE
 
@@ -651,6 +654,12 @@ FS_Config_Result_t FS_Config_Read(const char *filename)
 		{
 			result[6] = '\0';
 			strncpy(config.al_id, result, sizeof(config.al_id));
+		}
+
+		if (!strcmp(name, "Vuzix_ID"))
+		{
+			result[6] = '\0';
+			strncpy(config.vuzix_id, result, sizeof(config.vuzix_id));
 		}
 
 		// Compare config Device_ID with actual hardware device ID.
