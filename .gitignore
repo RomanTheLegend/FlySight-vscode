@@ -1,3 +1,9 @@
 build
 mx.scratch
 !.settings
+Deploy/
+Docs/
+fonts_raw/
+Recorded_jumps/
+
+.DS_Store

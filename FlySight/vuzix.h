@@ -6,8 +6,11 @@
 #ifndef VUZIX_H
 #define VUZIX_H
 
+#include <stdint.h>
+
 void FS_Vuzix_Init(void);
 void FS_Vuzix_DeInit(void);
 void FS_Vuzix_HandleDisconnect(void);
+void FS_Vuzix_OnPairingComplete(uint8_t status);
 
 #endif /* VUZIX_H */

@@ -107,7 +107,10 @@
 #define CFG_SECURE_OPTIONAL                   (0x01)
 #define CFG_SECURE_MANDATORY                  (0x02)
 
-#define CFG_SC_SUPPORT                        CFG_SECURE_OPTIONAL
+/* LESC disabled: STM32WB LESC f5 address-type encoding is incompatible with
+ * the Nordic nRF5 SDK used by Vuzix Z100, causing MIC failure (HCI 0x3E).
+ * Legacy Pairing + Bond (Just Works) works correctly on both sides. */
+#define CFG_SC_SUPPORT                        CFG_SECURE_NOT_SUPPORTED
 
 /**
  * Define Keypress Notification Support
@@ -689,6 +692,8 @@ typedef enum
     CFG_TASK_FS_START_UPDATE_ID,
     CFG_TASK_FS_ACTIVELOOK_ID,
     CFG_TASK_FS_VUZIX_ID,
+    CFG_TASK_FS_VUZIX_TX_ID,
+    CFG_TASK_FS_VUZIX_CONN_TIMEOUT_ID,
   /* USER CODE END CFG_Task_Id_With_HCI_Cmd_t */
   CFG_LAST_TASK_ID_WITH_HCICMD,                                               /**< Shall be LAST in the list */
 } CFG_Task_Id_With_HCI_Cmd_t;

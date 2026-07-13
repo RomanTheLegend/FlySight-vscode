@@ -253,6 +253,9 @@ uint8_t a_AdvData[15] =
 
 /* USER CODE BEGIN PV */
 uint8_t Advertising_mgr_timer_Id;
+static uint8_t s_conn_timeout_timer_id;
+static uint8_t s_scan_fail_count = 0;
+static int8_t  s_last_n_bonded   = 0;   /* updated by Scan_Request; read by adv report handler */
 
 /* Advertising callback */
 void (*Adv_Callback)(void) = 0;
@@ -288,6 +291,8 @@ static int8_t ble_count_bonded_devices(void);
 static void Scan_Request(void);
 static void Connect_Request(void);
 static void Disconnect_Request(void);
+static void ConnTimeoutCb(void);
+static void ConnTimeoutTask(void);
 /* USER CODE END PFP */
 
 /* External variables --------------------------------------------------------*/
@@ -400,6 +405,7 @@ void APP_BLE_Init(void)
   UTIL_SEQ_RegTask(1<<CFG_TASK_START_SCAN_ID, UTIL_SEQ_RFU, Scan_Request);
   UTIL_SEQ_RegTask(1<<CFG_TASK_CONN_DEV_1_ID, UTIL_SEQ_RFU, Connect_Request);
   UTIL_SEQ_RegTask(1<<CFG_TASK_DISCONN_DEV_1_ID, UTIL_SEQ_RFU, Disconnect_Request);
+  UTIL_SEQ_RegTask(1<<CFG_TASK_FS_VUZIX_CONN_TIMEOUT_ID, UTIL_SEQ_RFU, ConnTimeoutTask);
   /* USER CODE END APP_BLE_Init_4 */
 
   /**
@@ -430,6 +436,7 @@ void APP_BLE_Init(void)
   /* USER CODE BEGIN APP_BLE_Init_3 */
   /* Create timer to handle the connection state machine */
   HW_TS_Create(CFG_TIM_PROC_ID_ISR, &Advertising_mgr_timer_Id, hw_ts_SingleShot, Adv_Update_Req);
+  HW_TS_Create(CFG_TIM_PROC_ID_ISR, &s_conn_timeout_timer_id, hw_ts_SingleShot, ConnTimeoutCb);
 #if 0
   /* USER CODE END APP_BLE_Init_3 */
 
@@ -501,7 +508,8 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
       /* USER CODE END EVT_DISCONN_COMPLETE */
       if (p_disconnection_complete_event->Connection_Handle == BleApplicationContext.connectionHandleEndDevice1)
       {
-        APP_DBG_MSG("\r\n\r** DISCONNECTION EVENT OF END DEVICE 1 \n\r");
+        APP_DBG_MSG("\r\n\r** DISCONNECTION EVENT OF END DEVICE 1 reason=0x%02X\n\r",
+                    p_disconnection_complete_event->Reason);
         BleApplicationContext.EndDevice_Connection_Status[0] = APP_BLE_IDLE;
         BleApplicationContext.connectionHandleEndDevice1 = 0xFFFF;
         if (FS_Config_Get()->hud_device_type == 1)
@@ -551,8 +559,67 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
           /* USER CODE END EVT_LE_CONN_UPDATE_COMPLETE */
           break;
 
+        case HCI_LE_CONNECTION_COMPLETE_SUBEVT_CODE:
+        {
+          hci_le_connection_complete_event_rp0 *p_cc =
+              (hci_le_connection_complete_event_rp0 *)p_meta_evt->data;
+          HW_TS_Stop(s_conn_timeout_timer_id);
+          if (p_cc->Status != 0) {
+              APP_DBG_MSG("-- HCI_LE_CONNECTION_COMPLETE failed status=0x%02X\n\r", p_cc->Status);
+              if (BleApplicationContext.EndDevice_Connection_Status[0] == APP_BLE_CONNECTING
+                  && FS_Config_Get()->hud_device_type == 1) {
+                  aci_gap_clear_security_db();
+                  APP_DBG_MSG("-- Stale bond cleared after failed connection\n\r");
+              }
+              BleApplicationContext.EndDevice_Connection_Status[0] = APP_BLE_IDLE;
+              UTIL_SEQ_SetTask(1u << CFG_TASK_START_SCAN_ID, CFG_SCH_PRIO_0);
+              break;
+          }
+          connection_handle = p_cc->Connection_Handle;
+          role = p_cc->Role;
+          APP_DBG_MSG("-- HCI_LE_CONNECTION_COMPLETE role=%d handle=0x%04X\n\r", role, connection_handle);
+          if (role == 0x00)
+          {
+              APP_DBG_MSG("-- CONNECTION SUCCESS WITH END DEVICE 1 (basic)\n\r");
+              BleApplicationContext.EndDevice_Connection_Status[0] = APP_BLE_CONNECTED;
+              BleApplicationContext.connectionHandleEndDevice1 = connection_handle;
+              if (FS_Config_Get()->hud_device_type == 1)
+                  FS_Vuzix_Client_OnConnected(connection_handle);
+              else
+                  FS_ActiveLook_Client_StartDiscovery(connection_handle);
+          }
+          else
+          {
+              APP_DBG_MSG("-- CONNECTION SUCCESS WITH SMART PHONE (basic)\n\r");
+              BleApplicationContext.SmartPhone_Connection_Status = APP_BLE_CONNECTED;
+              BleApplicationContext.connectionHandleCentral = connection_handle;
+              HandleNotification.Custom_Evt_Opcode = CUSTOM_CONN_HANDLE_EVT;
+              HandleNotification.ConnectionHandle = connection_handle;
+              Custom_APP_Notification(&HandleNotification);
+              HW_TS_Stop(Advertising_mgr_timer_Id);
+              if (Adv_Callback) Adv_Callback();
+              Adv_Callback = Next_Adv_Callback;
+              Next_Adv_Callback = 0;
+              UTIL_SEQ_SetTask(1 << CFG_TASK_LINK_CONFIG_ID, CFG_SCH_PRIO_1);
+          }
+        }
+        break;
+
         case HCI_LE_ENHANCED_CONNECTION_COMPLETE_SUBEVT_CODE:
           p_enhanced_connection_complete_event = (hci_le_enhanced_connection_complete_event_rp0 *) p_meta_evt->data;
+          HW_TS_Stop(s_conn_timeout_timer_id);
+          if (p_enhanced_connection_complete_event->Status != 0) {
+              APP_DBG_MSG("-- HCI_LE_ENHANCED_CONNECTION_COMPLETE failed status=0x%02X\n\r",
+                          p_enhanced_connection_complete_event->Status);
+              if (BleApplicationContext.EndDevice_Connection_Status[0] == APP_BLE_CONNECTING
+                  && FS_Config_Get()->hud_device_type == 1) {
+                  aci_gap_clear_security_db();
+                  APP_DBG_MSG("-- Stale bond cleared after failed connection\n\r");
+              }
+              BleApplicationContext.EndDevice_Connection_Status[0] = APP_BLE_IDLE;
+              UTIL_SEQ_SetTask(1u << CFG_TASK_START_SCAN_ID, CFG_SCH_PRIO_0);
+              break;
+          }
           /**
            * The connection is done, there is no need anymore to schedule the LP ADV
            */
@@ -565,7 +632,7 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
         	  BleApplicationContext.EndDevice_Connection_Status[0] = APP_BLE_CONNECTED;
         	  BleApplicationContext.connectionHandleEndDevice1 = connection_handle;
         	  if (FS_Config_Get()->hud_device_type == 1)
-        	      FS_Vuzix_Client_StartDiscovery(connection_handle);
+        	      FS_Vuzix_Client_OnConnected(connection_handle);
         	  else
         	      FS_ActiveLook_Client_StartDiscovery(connection_handle);
           }
@@ -646,7 +713,7 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
                   {
                     if (memcmp(&name_data[i], al_id, al_id_len) == 0)
                     {
-                      APP_DBG_MSG("-- Device Name contains AL_ID '%s'\n\r", al_id);
+                      APP_DBG_MSG("-- Device Name contains ID '%s'\n\r", al_id);
                       foundDeviceName = 1;
                       break;
                     }
@@ -657,9 +724,22 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
               k += adlength + 1;
             } /* end while(k < event_data_size) */
 
+            /* Bonded Vuzix: glasses advertise with whitelist (ADV_IND, not ADV_DIRECT_IND).
+             * Scan report may omit device name.  Match by stored identity address. */
+            if (!foundDeviceName
+                && FS_Config_Get()->hud_device_type == 1
+                && s_last_n_bonded > 0
+                && le_advertising_event->Advertising_Report[0].Address_Type == s_peer_addr_type
+                && memcmp(le_advertising_event->Advertising_Report[0].Address,
+                          P2P_SERVER1_BDADDR, 6) == 0)
+            {
+                APP_DBG_MSG("-- Bonded Vuzix found by address\n\r");
+                foundDeviceName = 1;
+            }
+
             if (foundDeviceName)
             {
-                APP_DBG_MSG("-- Found matching ActiveLook device!\n\r");
+                APP_DBG_MSG("-- Found matching HUD device!\n\r");
                 BleApplicationContext.EndDevice1Found = 0x01;
                 // Store the BD Address and address type of this device
                 s_peer_addr_type = le_advertising_event->Advertising_Report[0].Address_Type;
@@ -719,8 +799,8 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
                                                                 CONN_L1,
                                                                 CONN_L2,
 																pr->Identifier,
-                                                                0x00);
-            APP_DBG_MSG("\r\n\r** NO UPDATE \n\r");
+                                                                0x01);
+            APP_DBG_MSG("\r\n\r** CONN PARAM UPDATE ACCEPTED \n\r");
             if(result != BLE_STATUS_SUCCESS)
             {
               /* USER CODE BEGIN BLE_STATUS_SUCCESS */
@@ -758,6 +838,7 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
               if (BleApplicationContext.EndDevice1Found == 0x01
                   && BleApplicationContext.EndDevice_Connection_Status[0] != APP_BLE_CONNECTED)
               {
+                s_scan_fail_count = 0;
                 APP_DBG_MSG("-- Setting task CFG_TASK_CONN_DEV_1_ID\n\r");
                 UTIL_SEQ_SetTask(1 << CFG_TASK_CONN_DEV_1_ID, CFG_SCH_PRIO_0);
               }
@@ -765,7 +846,15 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
                        && FS_Config_Get()->hud_mode != 0)
               {
                 /* Device not found this scan window — retry until it comes back */
-                APP_DBG_MSG("-- ActiveLook device not found, retrying scan\n\r");
+                APP_DBG_MSG("-- HUD device not found, retrying scan\n\r");
+                if (FS_Config_Get()->hud_device_type == 1 && ++s_scan_fail_count >= 5u)
+                {
+                  /* Stale bond is blocking scan (old IRK can't resolve glasses' new RPA).
+                   * Clear it so Scan_Request rebuilds an empty resolving list. */
+                  s_scan_fail_count = 0;
+                  APP_DBG_MSG("-- Stale bond detected, clearing security DB\n\r");
+                  aci_gap_clear_security_db();
+                }
                 UTIL_SEQ_SetTask(1 << CFG_TASK_START_SCAN_ID, CFG_SCH_PRIO_0);
               }
 #if (CFG_P2P_DEMO_MULTI != 0)
@@ -784,6 +873,11 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
           /* USER CODE END RADIO_ACTIVITY_EVENT*/
           break; /* ACI_HAL_END_OF_RADIO_ACTIVITY_VSEVT_CODE */
 #endif /* RADIO_ACTIVITY_EVENT != 0 */
+
+        case ACI_GAP_SLAVE_SECURITY_INITIATED_VSEVT_CODE:
+          /* Stack auto-handles; log for diagnostics only. */
+          APP_DBG_MSG(">>== ACI_GAP_SLAVE_SECURITY_INITIATED_VSEVT_CODE\n");
+          break;
 
         /* PAIRING */
         case (ACI_GAP_KEYPRESS_NOTIFICATION_VSEVT_CODE):
@@ -845,6 +939,10 @@ SVCCTL_UserEvtFlowStatus_t SVCCTL_App_Notification(void *p_Pckt)
           APP_DBG_MSG("\n");
 
           /* USER CODE BEGIN ACI_GAP_PAIRING_COMPLETE_VSEVT_CODE*/
+          if (FS_Config_Get()->hud_device_type == 1)
+          {
+            FS_Vuzix_OnPairingComplete(p_pairing_complete->Status);
+          }
           if (p_pairing_complete->Status != 0)
           {
             /* Clear stale bonds so the next attempt starts fresh on our side */
@@ -1645,14 +1743,35 @@ static int8_t ble_count_bonded_devices(void)
   }
 
   // 3) Add bonded identities to resolving list (PM0271 5.3.1 step 5)
+  //    When total == 0, aci_gap_add_devices_to_resolving_list returns 0x0C
+  //    (Command Disallowed) — use the direct HCI clear command instead so the
+  //    old IRK from a prior bond doesn't linger in the hardware resolving list.
+  if (total == 0)
+  {
+    ret = hci_le_clear_resolving_list();
+    if (ret != BLE_STATUS_SUCCESS)
+    {
+      APP_DBG_MSG("hci_le_clear_resolving_list fail %x\r\n", ret);
+    }
+    APP_DBG_MSG("Resolving List cleared (no bonded devices)\r\n");
+    return 0;
+  }
+
+  /* Cache first bonded peer for direct connection (used by Scan_Request) */
+  s_peer_addr_type = devices[0].Address_Type;
+  memcpy(P2P_SERVER1_BDADDR, devices[0].Address, 6);
+
   ret = aci_gap_add_devices_to_resolving_list(total, rl_entries, 1);
   if (ret != BLE_STATUS_SUCCESS)
   {
     APP_DBG_MSG("aci_gap_add_devices_to_resolving_list fail %x\r\n", ret);
-    return -1;
+    /* Bond data is still valid — don't fail; direct connect path will use it */
+  }
+  else
+  {
+    APP_DBG_MSG("Resolving List populated with %u bonded device(s)\r\n", total);
   }
 
-  APP_DBG_MSG("Resolving List populated with %u bonded device(s)\r\n", total);
   return (int8_t)total;
 }
 
@@ -1672,6 +1791,10 @@ static void Scan_Request(void)
   {
     /* USER CODE BEGIN APP_BLE_CONNECTED */
     BleApplicationContext.EndDevice1Found = 0x00;
+    s_last_n_bonded = ble_count_bonded_devices();  /* rebuild resolving list; also caches bonded peer addr */
+    /* Vuzix glasses use whitelist-filtered ADV_IND (directed advertising is compiled out
+     * in their firmware).  Fall through to general scan for bonded and unbonded alike;
+     * the scan report handler matches bonded devices by stored identity address. */
     /* USER CODE END APP_BLE_CONNECTED */
     result = aci_gap_start_general_discovery_proc(SCAN_P,
                                                   SCAN_L,
@@ -1732,6 +1855,11 @@ static void Connect_Request(void)
       /* USER CODE END BLE_STATUS_END_DEVICE_1_SUCCESS */
       BleApplicationContext.EndDevice_Connection_Status[0] = APP_BLE_CONNECTING;
       APP_DBG_MSG("==> Connect_Request Succeeded \n\r");
+      if (FS_Config_Get()->hud_device_type == 1) {
+          /* 5 s watchdog: if HCI_LE_CONNECTION_COMPLETE never fires after
+           * scan found the device, cancel and retry scan.  Bond is preserved. */
+          HW_TS_Start(s_conn_timeout_timer_id, 5u * 1000000u / CFG_TS_TICK_VAL);
+      }
     }
     else
     {
@@ -1744,6 +1872,22 @@ static void Connect_Request(void)
   }
 
   return;
+}
+
+static void ConnTimeoutCb(void)
+{
+    UTIL_SEQ_SetTask(1u << CFG_TASK_FS_VUZIX_CONN_TIMEOUT_ID, CFG_SCH_PRIO_0);
+}
+
+static void ConnTimeoutTask(void)
+{
+    if (BleApplicationContext.EndDevice_Connection_Status[0] != APP_BLE_CONNECTING)
+        return;
+
+    APP_DBG_MSG("-- Vuzix: connection timed out, retrying scan (bond preserved)\n\r");
+    hci_le_create_connection_cancel();
+    BleApplicationContext.EndDevice_Connection_Status[0] = APP_BLE_IDLE;
+    UTIL_SEQ_SetTask(1u << CFG_TASK_START_SCAN_ID, CFG_SCH_PRIO_0);
 }
 
 /**

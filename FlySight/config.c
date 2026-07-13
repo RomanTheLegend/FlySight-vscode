@@ -369,7 +369,18 @@ static const char defaultConfig[] =
 		"\n"
 		"AL_Line:      13 ; Course\n"
 		"AL_Units:      0 ; Degrees\n"
-		"AL_Dec:        0 ; Decimal places\n";
+		"AL_Dec:        0 ; Decimal places\n"
+		"\n"
+		"; Vuzix interface\n"
+		"\n"
+		"HUD_Device_Type: 1 ; HUD device\n"
+		"                 ;   0 = ActiveLook\n"
+		"                 ;   1 = Vuzix Z100\n"
+		"Vuzix_ID: f1be52  ; Vuzix device ID substring (6 chars)\n"
+		"HUD_Mode:      1  ; HUD mode\n"
+		"                 ;   0 = Not active\n"
+		"                 ;   1 = Default mode\n"
+		"HUD_Rate:   1000  ; HUD update rate (ms)\n";
 
 void FS_Config_Init(void)
 {
